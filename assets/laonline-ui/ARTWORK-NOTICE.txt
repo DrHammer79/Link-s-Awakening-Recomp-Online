@@ -1,0 +1,4 @@
+Extracted card illustrations, logo silhouette, navigation icon silhouettes and panorama from user-supplied UI reference images. No AI-generated replacement artwork. Original clean background/font were not supplied; existing game title backdrop retained. All controls/text/panels rendered as live ImGui elements.
+The three supplied D-pad PNGs are included byte-for-byte. Black transparent graphics use a light runtime tint, retaining their alpha; original files remain unchanged.
+laugh-portrait.png: the laughing portrait for the V15 PvP card, cropped from an image the project owner supplied (2026-11-02).
+coop-velvet.png: the Play Co-Op card picture - artwork by Velvet_Charm (LA-Online tester), supplied by the project owner, who asked for it on the Play Co-Op card with a credit to her (2026-11-02); resized only.

@@ -1,144 +1,300 @@
-<img width="1280" height="640" alt="Links_Awakening_GitHub_Social_Preview_1280x640" src="https://github.com/user-attachments/assets/679f0cc0-e95b-43d9-8d5c-8f475b700dde" />
-# The Legend of Zelda: Link's Awakening — Recomp Online
+# LAS Recomp
 
-### A fan-made online co-op project by ThyHeroOfTime
+> [!IMPORTANT]
+> **This project was made almost exclusively with AI.** Nearly all of the code, tooling, reverse engineering and
+> documentation in this repository was written by and will be maintained by an AI (Anthropic's Claude, through Claude Code),
+> directed, tested and reviewed by a human. As a huge fan of this game, I made this for myself. Sharing it is a courtesy.
+> If you don't agree with the use of AI or don't trust code written by AI, that is your right, but I'm not interested
+> in the controversy in relation to this project. You may simply ignore this project and its code.
+> As with anything on the internet, you run the code at your own discretion.
 
-**Project status:** Beta / active development  
-**Foundation:** [LAS Recomp by peiikai and contributors](https://github.com/peiikai/LASRecomp)  
-**Focus:** Playing *Link's Awakening* together, not replacing the original single-player adventure
+**LAS Recomp** is a static recompilation of *The Legend of Zelda: Link's Awakening* (Nintendo Switch, 2019) into a
+native Windows, macOS and Linux application.
 
-> **Important:** This is an unofficial community project. It is not affiliated with, sponsored by, or endorsed by Nintendo. Multiplayer features are still in development, and beta builds can contain bugs. Back up your saves before testing.
+> [!NOTE]
+> Currently supported platforms:
+> - macOS - Apple Silicon only, Metal graphics backend + MetalFX
+> - Windows - x86-64 only, Vulkan graphics backend
+> - Linux - x86-64, Vulkan graphics backend (AppImage)
+> - Linux aarch64 (ARM) - **experimental**: built but untested on real hardware; reports welcome
+>   ([docs/linux.md](docs/linux.md) lists what to include)
 
-## ❤️ Why I made this project
+## System requirements
 
-I started **Link's Awakening Recomp Online** for a very personal reason: **I wanted to play The Legend of Zelda: Link's Awakening with my son and my kids.**
+These are the minimums during the beta and may change as development continues.
 
-*The Legend of Zelda* has always represented adventure, discovery, puzzles, and memorable moments to me. But while exploring Koholint Island, I kept coming back to one thought: *Wouldn't it be amazing if I could share this whole journey with my children instead of experiencing it alone?*
+**macOS:** any Apple Silicon Mac (M1 or newer) on macOS 15 or newer. Intel Macs aren't supported.
 
-I wanted to be able to stand beside my son in Mabe Village, head into the Mysterious Woods together, explore dungeons as a team, face enemies, find secrets, help each other through difficult parts of the story, and make memories as a family. Not just see another Link on the screen, but actually **play together**.
+**Windows and Linux:**
 
-That's what inspired this project.
+| | Minimum |
+|---|---|
+| OS | Windows 10 or 11 (64-bit), or 64-bit Linux from about 2022 or newer (including the Steam Deck) |
+| CPU | x86-64 with AVX2 and FMA: Intel 4th gen (Haswell) or newer, or AMD Ryzen |
+| GPU | Vulkan 1.3 with an up-to-date driver, about as fast as a Switch or faster. For example: NVIDIA GTX 900 series or newer, AMD Radeon RX 400 series or Ryzen integrated graphics or newer, Intel Iris Xe or newer |
+| RAM | 8 GB (16 GB recommended) |
+| Disk | About 12 GB free for setup |
 
-I am not making this because I want to replace what makes *Link's Awakening* special. I love the original game. My goal is to build something on top of that experience so families, friends, and longtime Zelda fans can share the adventure online.
+Not supported: Intel UHD 600-series and older Intel integrated graphics, and anything slower than a Switch. Linux on ARM (aarch64) is experimental.
 
-What began as something I wanted to enjoy with my son has grown into a community project. Seeing players offer feedback, test builds, and get excited about the possibility of exploring Koholint Island together has given me even more motivation to keep going.
+![Mabe Village in a 21:9 window: the unlocked aspect ratio shows more of the island](docs/ultrawide.jpg)
 
-This project has involved a lot of experimentation, broken builds, debugging, and learning. Some things have worked beautifully; other parts have been much harder than I expected. I'm still committed to improving it and sharing the progress with everyone who wants to be part of the journey.
+> [!NOTE]
+> **No game files are included.** LAS Recomp needs your own legally obtained copy of the extracted game files of
+> *Link's Awakening* **v1.0.0, v1.0.1 or v1.1.0**. When setting up, choose a folder that contains the `exefs`
+> and `romfs` folders, or their contents. Instructions on how to obtain these files will **NOT** be provided.
+> On first launch the app sets up what it needs, including the actual recompilation locally. No game files, assets or fonts are included.
+> The screenshot shows the start screen after setup; no Nintendo artwork is included until provided by the user.
 
-**At the heart of LA-Online is something simple: I want to be able to sit down, connect with my son and my kids, and enjoy this adventure together.** I hope that, one day, other families and friends can make their own memories with it too.
+![The start screen: choose vanilla or a randomizer seed, set up your game files, settings](docs/start_screen.jpg)
 
-— **ThyHeroOfTime**
+## Project Discord
+https://discord.gg/DhrgdYqdcY
 
-## 🎮 What is Link's Awakening Recomp Online?
+## Status
 
-**LA-Online Recomp** is an experimental, fan-made online multiplayer extension built around the native PC recompilation of the Nintendo Switch version of *The Legend of Zelda: Link's Awakening* (2019).
+This is a beta release. That means bugs are likely, crashes could occur, randomizer seeds could possibly be unsolvable (dungeon room shuffle modes are especially experimental at this point) and some graphics issues remain (especially in wide and ultrawide aspect ratios). This is a work in progress, hence the beta designation. To report a bug or a possible randomizer logic issue, open a [GitHub issue](https://github.com/peiikai/LASRecomp/issues) - see [CONTRIBUTING.md](CONTRIBUTING.md#reporting-bugs) for what to include.
 
-The long-term vision is a complete online cooperative adventure where connected players have their own Link, their own controls and personal resources, but can share appropriate parts of the world and story.
+### Known issues
 
-Development areas include:
+Known issues and their status are on the [GitHub issues page](https://github.com/peiikai/LASRecomp/issues).
 
-- **Online sessions:** Hosting, joining, player identities, and connected-player status.
-- **Remote Links:** Rendering other players with independent movement, facing, animations, and distinct appearances.
-- **Multiplayer HUD:** Player usernames, their individual hearts, and location information.
-- **Text chat:** Chat input, overhead speech bubbles, typing indicators, and a compact chat feed.
-- **Navigation:** Teammate markers and a small multiplayer minimap.
-- **Shared discoveries:** Cooperative item and rupee pickup handling, with each player's personal resources kept separate.
-- **Story co-op:** Safe synchronization of supported quest progression, dungeon doors, puzzles, key items, and boss events.
-- **Enemy and companion synchronization:** Shared encounters and companions such as BowWow where supported.
-- **Beta testing tools:** Co-op settings, diagnostics, and bug-reporting workflows.
+## Steam Deck
 
-**Not everything above is finished or fully verified.** Some features have working interfaces or partial implementations while gameplay synchronization and cross-platform stability are still being tested. The release notes for each beta should say exactly which features are available in that build.
+- Add the AppImage to Steam as a non-Steam game and play it from there. In Desktop Mode, games Steam didn't launch
+  get Steam's desktop controller layout, which sends extra keyboard presses.
+- If it won't start, add this to the game's launch options in Steam: `APPIMAGE_EXTRACT_AND_RUN=1 %command%`
 
-### The goal: two independent players, one shared adventure
+## Features
 
-Each person should control **only their own Link**. Other players' Links should reflect real network data—not copied local inputs or unrelated enemy AI. Shared progression must be applied safely, without blindly merging save flags or overwriting another player's personal save.
+**Runs natively**
+- **This is not emulation.** It runs natively on Windows, macOS and Linux.
+- Works with game versions 1.0.0, 1.0.1 and 1.1.0.
+- Wider screens show more of the island, up to ultrawide. You can switch back to the original 16:9.
+- Higher resolutions, a "match your display" option and dynamic resolution, with MetalFX (Mac) or FSR 1 (Windows and Linux) upscaling and SMAA anti-aliasing.
+- Shaders are prepared ahead of time, so new areas don't stutter.
+- A start screen where you pick vanilla or a randomizer seed, set up your game files and choose your settings.
+- In-game menu: F1, or Minus + Plus on a controller.
+- Switch between vanilla and any randomizer seed without restarting.
+- Keyboard and controller support, with every button remappable. Button prompts match your controller (Xbox, PlayStation or Nintendo).
+- Controller rumble, and the light bar on PlayStation controllers shows Link's health.
+- Controllers that aren't recognised can be added with a mapping file (see [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB)).
+- Play in English, Japanese, Spanish, French, German, Italian, Dutch, Russian, Korean or Chinese (Simplified or Traditional).
+- Optional extras: 360-degree movement, blur removal, mirror mode, faster walking and hiding the Hero Mode icon.
+- Cosmetics: change Link's tunic, hair, skin and shield colours, the colour of the grass, leaves and sand (with season presets), give enemies random colours, or play with a Game Boy, Game Boy Color or grayscale filter.
+- Optional run timer, with LiveSplit support.
 
-Original single-player gameplay should remain available independently of Co-op.
+**Randomizer**
+- In-game seed generator, with seed IDs for sharing and separate saves for each seed.
+- Shuffles all items, the trade quest, bombs and Magic Powder.
+- Hint Sheet: every seed starts with one that points you to your next important item.
+- Escape Bottle: every seed starts with it. Use it to warp to the dungeon entrance, or to Marin and Tarin's house outside dungeons.
+- Pickup text says which dungeon a key or dungeon item belongs to.
+- Extra places items can hide:
+  - Potsanity: every pot. Unchecked pots are gold.
+  - Bushsanity: every bush. Unchecked bushes are gold.
+  - Digsanity: every diggable spot on the overworld, about 5,000. Holes stay dug.
+  - Shellsanity: every Secret Seashell hiding spot.
+  - Underwater items: sunken treasures you dive for.
+  - Shopsanity: the shop's items. Buy them or steal them.
+  - Trendsanity: every Trendy Game prize.
+  - Keysanity: keys for any dungeon can be anywhere.
+- Small items from bushes, pots and digging don't stop you with the item scene; important items still do.
+- Item placement is paced, so big seeds don't hand you every key item right away.
+- Pets: companions are items you find. The Rooster helps with Feather checks, Marin opens the desert, and the Ghost unlocks his grave. Switch or send them away from the pause menu.
+- Boss souls and mini-boss souls: a boss won't appear until you find its soul.
+- Triforce Hunt: collect Triforce pieces instead of waking the Wind Fish.
+- Enemy Randomizer: shuffles enemies, optionally with mini-bosses (including Shadow Link) on the overworld. Enemies can change every time you enter an area.
+- Hookshot anything: the hookshot grabs onto any wall or object.
+- Environment and music randomizers. Acorn and Piece of Power drops can be turned off.
+- Entrance Randomizer: shuffles dungeons, houses, caves and connectors, with a decoupled option.
+- Dungeon Room Shuffle: every dungeon is rebuilt from its own rooms each seed.
+  - Coupled: going back through a door takes you back where you came from.
+  - Decoupled: going back through a door takes you somewhere else.
+  - Labyrinth (planned): doors can lead into other dungeons.
+  - The map can show how rooms connect as you explore.
+- A tracker on the pause menu's map shows how many checks are left in each area and whether you can reach them.
+- The inventory screen shows your keys, dungeon items, trade items and souls for each dungeon.
+- Race mode: the spoiler log stays locked until the credits, and the title screen shows a seed hash so racers can check they have the same seed.
 
-## 🧪 Beta status and known limitations
+## Building from source
 
-This is **an active-development beta**, not a promise of completely finished online story co-op.
+Every platform needs your own game files (v1.0.0, v1.0.1 or v1.1.0): build first, then use the start screen's game-file setup.
+`make gen` then recompiles the game code from your own game files into `generated/`, and `make` builds it into its own
+library next to the app (`build/lasgame.*`); without it the start screen builds that library itself, as it does for
+players. Release builds hold none of the game's code: the start screen builds it on each player's machine from their
+own game files, with the bundled generator (`make gen-helper`) and compiler (`tools/fetch_zig.sh`).
 
-Areas still requiring ongoing verification and refinement include:
+### macOS
 
-- Remote Link visibility during room and scene transitions.
-- Reliable health, item, reward, and companion replication.
-- Safe reconciliation when players join with different story progression.
-- Dungeon, overworld enemy, and boss synchronization.
-- Chat and controller-input stability.
-- Native PC, real Nintendo Switch, and compatible emulator interoperability.
-- Correct operation of every exposed Co-op settings control.
+Requirements: Apple Silicon, Xcode command line tools (clang), [Homebrew](https://brew.sh) `sdl3` and `ffmpeg`,
+Python 3.12.
 
-**Please back up your save data before testing**, especially when you and a friend are at different points in the story. If a beta becomes stuck, avoid overwriting your only working save.
+1. Build: `make -j10` -> `build/lasrecomp`. Set up your game files (above), then `make gen` and `make -j10` again.
+2. Randomizer: create the Python environment for LAS-Randomizer, from `third_party/LAS-Randomizer`:
+   `python3.12 -m venv venv && venv/bin/pip install -r requirements.txt`.
+3. Run: `./build/lasrecomp extracted` (start screen) or `./build/lasrecomp extracted --play` (straight into the game).
+4. Package: `make deps` (once: SDL3, FFmpeg, keystone and Python from pinned sources, built for macOS 15),
+   `make rando-helper` (the seed generator as a standalone helper, so players need no Python), `make gen-helper` and
+   `tools/fetch_zig.sh` (what the start screen builds the game code with), then `make app` ->
+   `build/LAS Recomp.app` (macOS 15+, Apple Silicon) and `make dmg` -> `build/dist/LAS Recomp-<version>-macOS.dmg`.
 
-## 💻 Platforms and the original game
+### Windows
 
-LA-Online development focuses on the **native PC recompilation**, while cross-platform online co-op with **real modded Nintendo Switch hardware** and compatible Switch emulators is part of the project's goal. A platform should only be considered supported by a particular beta when that specific combination has been tested and documented.
+Requirements: Windows 10+ x86-64, a CPU with AVX2 and a GPU with Vulkan 1.3. More detail in
+[docs/BUILD-windows.md](docs/BUILD-windows.md).
 
-This repository does **not** provide a copy of *The Legend of Zelda: Link's Awakening*, Nintendo-owned game files, ROMs, decryption keys, or copyrighted game assets. You must supply your own legally obtained game files as required by the upstream recompilation and applicable law.
+1. One-time setup, in PowerShell from the repo root: `powershell -ExecutionPolicy Bypass -File tools\setup_windows.ps1`.
+   It installs MSYS2 (UCRT64: clang, make, SDL3, FFmpeg, Vulkan, shaderc), Python 3.12 for the tools and the
+   randomizer (`third_party\LAS-Randomizer\venv`) and switches the clone to LF line endings.
+2. Build, from an MSYS2 UCRT64 shell (or Git Bash with `export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"`):
+   `make -j` -> `build/lasrecomp.exe`. Set up your game files (above), then `make gen` and `make -j` again.
+3. Run: `./build/lasrecomp.exe extracted`, from a shell with `C:\msys64\ucrt64\bin` on PATH (for the DLLs).
+4. Package: `make deps-windows` (once: LGPL FFmpeg), `make rando-helper RANDO_PY="<path to python.org Python 3.12>"`
+   (MSYS2's Python has no oead wheel), then `make dist` -> `build/dist/LAS Recomp-<version>-windows.zip`.
 
-For upstream setup and requirements, visit [LAS Recomp](https://github.com/peiikai/LASRecomp). For LA-Online-specific installation and version compatibility, follow the instructions bundled with the particular beta release. Do not assume every upstream release or game revision is automatically compatible with every LA-Online build.
+### Linux
 
-## 🐛 Bug reports and community feedback
+Requirements: x86-64 with AVX2 (or aarch64, experimental), a GPU with Vulkan 1.3, clang, SDL 3, FFmpeg, shaderc and
+Vulkan Memory Allocator from your distribution, Python 3.12. Packages, cross builds and details in
+[docs/linux.md](docs/linux.md).
 
-If you encounter a problem, your reports genuinely help. Useful bug reports include:
+1. Build: `make -j` -> `build/lasrecomp`. Set up your game files (above), then `make gen` and `make -j` again.
+2. Run: `./build/lasrecomp extracted`.
+3. Package: `make appimage` (this machine's arch; `ARCH=aarch64` cross-compiles) or `make appimages` (both) ->
+   `build/dist/LAS Recomp-<version>-linux-<arch>.AppImage`, built in Ubuntu 22.04 containers (podman). `make smoketest`
+   checks the x86-64 AppImage before a release.
 
-1. The exact LA-Online beta/build and LAS Recomp version you used.
-2. Whether you were the host or client, and which platforms were connected.
-3. What area or dungeon you were in and what you were doing.
-4. What happened, what you expected to happen, and how to reproduce it.
-5. Relevant screenshots and logs, with private information removed.
+Where files live (game files, saves, seeds, settings and logs):
+- macOS: `~/Library/Application Support/com.peiikai.lasrecomp/`
+- Windows: next to `lasrecomp.exe`, so keep the `LAS Recomp` folder somewhere writable (not Program Files).
+- Linux: `~/.local/share/lasrecomp/`
+- You can move it to another folder or drive in Settings > Prelaunch > Data folder.
+- `LARECOMP_DATA_ROOT=<dir>` overrides all of these.
+- For a bug report, attach `lasrecomp.log` from that folder.
 
-If the in-game **Report A Bug** feature is available and functional in your build, you can use it. Otherwise, use the repository's GitHub Issues page or the support channel announced with the release. Please do not publicly upload private server credentials or unredacted save data.
+### Resuming game-code builds
 
-## 🙏 Special thanks and credits
+If the game-code build is cancelled or interrupted, **Resume game code** continues where it stopped. It also resumes
+by itself the next time LAS Recomp starts. **Game Files > Clear build cache** removes the build's leftover files
+without touching the installed game, your game files or your saves.
 
-### Original recompilation — peiikai and the LAS Recomp contributors
+## Credits
 
-A huge, heartfelt **thank you to [peiikai](https://github.com/peiikai)**, the creator and maintainer of **[LAS Recomp](https://github.com/peiikai/LASRecomp)**, and to everyone who has contributed to that project.
+**Contributors** - thank you to everyone who has sent code (GitHub handles, in order of first contribution):
+- **[@dvilelaf](https://github.com/dvilelaf)** - the System language setting (#15), a packaging fix (#10) and the
+  level-transition crash fix (#34)
+- **[@Tensorlong](https://github.com/Tensorlong)** - the fix for the white Link on M1 Macs (#18)
+- **[@mansarip](https://github.com/mansarip)** - support for unrecognised controllers (#26)
+- **[@we11adam](https://github.com/we11adam)** - the right font for each language (#27) and the Chinese language
+  codes (#25)
+- **[@Maganra](https://github.com/Maganra)** - faster graphics checks on Linux (#42)
+- **[@hjqcan](https://github.com/hjqcan)** - game addresses in one place (#57), settings and Traditional Chinese fixes
+  (#53), much less memory used on Windows (#107), Vulkan fixes (#108, #127, #128), an x86 rounding fix (#115), movie
+  memory fixes (#112), Windows logs (#114), resumable game-code builds (#56), and save fixes (#169, #170, #182)
+- **[@gitarre1234rr5](https://github.com/gitarre1234rr5)** - controller rumble (#104) and a regression test (#88)
+- **[@rkammoun](https://github.com/rkammoun)** - the fix for the black walls in the Ukuku Prairie cave on Mac (#215, #216)
+- **[@NevesHenry](https://github.com/NevesHenry)** - a clear message on Linux when no file window can open (#298), and
+  the rumble test running in CI (#299)
+- **[@ky1vstar](https://github.com/ky1vstar)** - a much faster Linux ARM release build (#319)
+- **[@theb0rg](https://github.com/theb0rg)** - the fix for AMD integrated graphics on Windows (#335)
+- **[@gtf-dot](https://github.com/gtf-dot)** - the game-text font on Linux (#330)
 
-The native PC recompilation is the foundation that makes this particular LA-Online project possible. The work involved in recompilation, reverse engineering, tooling, rendering, platform support, fixes, and documentation is substantial. I want to recognize that work and make clear that **I did not create the original LAS Recomp project**.
+Thanks also to everyone who reports issues and tests builds. Your logs and screenshots find most of the bugs.
 
-Thank you for making the adventure accessible through a native PC application and for sharing your work with the community. Please also see the upstream project's own [README and credits](https://github.com/peiikai/LASRecomp#credits) for its full contributor acknowledgments.
+**LAS-Randomizer** - the randomizer at the heart of this project's randomizer features, vendored (with local
+changes) in `third_party/LAS-Randomizer` under the MIT license. Huge thanks to its authors and community:
+- **Owen_Splat** - LAS-Randomizer (https://github.com/Owen-Splat/LAS-Randomizer)
+- **Glan** - created the original early builds of the randomizer (https://github.com/la-switch/LAS-Randomizer)
+- **ProfessorLaw** - additional programming
+- and everyone who has reported bugs, given feedback or contributed to LAS-Randomizer
 
-### The original game and its creators
+**Community mods** - some options re-implement ideas from these GameBanana mods (re-implemented in the recomp;
+none of their files are used):
+- **360 Controls (And More!)** by Owen_Splat - 360-degree movement, blur removal (blur removal patch by theboy181)
+  (https://gamebanana.com/mods/659802)
+- **XBOX UI** by fellow_demo - Xbox button prompts (https://gamebanana.com/mods/540069)
+- **PS4 UI Buttons** by messiahgov - PlayStation button prompts (https://gamebanana.com/mods/324458)
+- **No Hero Mode Indicator** by Boo/Calla - hide the Hero Mode icon (https://gamebanana.com/mods/441172)
 
-Thank you to the designers, artists, composers, programmers, and everyone responsible for creating *The Legend of Zelda: Link's Awakening* and its Nintendo Switch remake. The world of Koholint Island is why this fan project exists in the first place.
+**Libraries and tools**
+- [SDL 3](https://libsdl.org) - windowing, input, audio (zlib license)
+- [FFmpeg](https://ffmpeg.org) - movie playback (LGPL)
+- [Dear ImGui](https://github.com/ocornut/imgui) - overlay menu and start screen (MIT)
+- [Baloo 2](https://github.com/EkType/Baloo2) by Ek Type - the start screen's font (SIL Open Font License 1.1, `third_party/fonts/Baloo2/OFL.txt`)
+- [BIZ UDPGothic](https://github.com/googlefonts/morisawa-biz-ud-gothic) by Morisawa - the game's text on Linux when you haven't imported the Switch fonts: a free font from the same universal-design gothic family as the Switch's UD Shin Go (SIL Open Font License 1.1, `third_party/fonts/BIZUDPGothic/OFL.txt`)
+- [DejaVu Sans](https://dejavu-fonts.github.io) - the in-game menu and button letters when no system font fits, and the game text's last resort (Bitstream Vera / DejaVu license, `third_party/fonts/DejaVu/LICENSE`)
+- [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) - Windows and Linux renderer (MIT)
+- [SMAA](https://github.com/iryoku/smaa) by Jorge Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro and Diego
+  Gutierrez - the anti-aliasing option (MIT, `third_party/smaa/LICENSE.txt`)
+- [AMD FidelityFX Super Resolution 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) - the Windows and Linux upscaler
+  option, ported to GLSL (MIT)
+- [oead](https://github.com/zeldamods/oead) and [evfl](https://github.com/zeldamods/evfl) - Nintendo file formats, used by LAS-Randomizer
+- [PyInstaller](https://pyinstaller.org) - packs the seed generator into a standalone helper (GPL 2.0+ with the
+  bootloader exception, which allows distributing the packed program). The helper bundles CPython (PSF License),
+  oead / evfl (GPL 2.0+), [Keystone](https://www.keystone-engine.org) (GPL 2.0; Python bindings BSD), quicktex
+  (LGPL 3), Pillow (MIT-CMU), PyYAML (MIT) and appdirs (MIT)
+- [Zig](https://ziglang.org) - its C compiler (`zig cc`: Clang and LLD) builds the game code on the player's
+  machine during setup (MIT; LLVM, Clang, LLD: Apache 2.0 with LLVM exceptions)
+- The game code generator (`tools/gen.py`) is packed by PyInstaller into a standalone helper too. It bundles CPython,
+  [Capstone](https://www.capstone-engine.org) (BSD 3-clause; disassembly), [Unicorn](https://www.unicorn-engine.org)
+  (GPL 2.0; Python bindings BSD; runs small pieces of code to resolve jump tables) and
+  [python-lz4](https://github.com/python-lz4/python-lz4) (BSD 3-clause, with the LZ4 library: BSD 2-clause)
+- [envytools](https://github.com/envytools/envytools) - NVIDIA GPU documentation used for the shader translator
+- An MIT-licensed open-source project's audio renderer and shader instruction decoders (license and copyright notice:
+  `third_party/ryujinx/LICENSE.txt`) - the audio renderer's reverb is a port of its reverb code and the mixer is
+  modelled on its renderer; its instruction decoders were the bit-layout reference for parts of the shader translator
+- **Dusklight** by the TwilitRealm team (https://github.com/TwilitRealm/dusklight) - design inspiration for the start
+  screen (Play / Settings / Game Files layout)
+- **SuperMarioWonderRecomp** by BelmanteGu (https://github.com/BelmanteGu/SuperMarioWonderRecomp) - its
+  ahead-of-time shader approach is what the first-launch shader preparation follows (a shipped list of shader variants,
+  built on the player's machine from their own game files)
+- The Switch homebrew community's documentation ([Switchbrew](https://switchbrew.org))
 
-All original Zelda characters, names, designs, game content, and related trademarks remain the property of their respective rights holders.
+## Legal
 
-### Our beta testers and community
+LAS Recomp is a fan project. It is not affiliated with, endorsed by or sponsored by Nintendo. *The Legend of Zelda*
+and *Link's Awakening* are trademarks of Nintendo. No game files, game code, assets or fonts are included - not in
+this repository and not in release builds. You must provide your own legally obtained copy of the game files to play.
 
-A very special thank you to the players who have spent their own time testing online sessions, reporting bugs, sending screenshots, investigating broken story progression, and giving constructive ideas:
+## License
 
-- **Velvet / Velvet_Charm** — thank you for your detailed feedback, gameplay testing, and suggestions for making multiplayer communication cleaner.
-- **Sanic** — thank you for testing cooperative story progression and helping expose the kinds of issues that only show up when players are at different stages of the adventure.
-- **Kit** — thank you for supporting the project and helping with community testing and feedback.
-- **Raygar** — thank you for being part of the testing community and helping the project improve.
-- **LunarFrankie** — a special thank you to my son, and one of the biggest reasons I wanted to make this project at all.
-- **Every other beta tester and community member** who has played, submitted logs, reported bugs, suggested improvements, or simply encouraged the project along the way.
+LAS Recomp's own code (the recompiler tools, the runtime, the randomizer additions) is open source under the
+[MIT License](LICENSE). Third-party components keep their own licenses: LAS-Randomizer (MIT), ported audio renderer code (MIT, see `third_party/`), Dear ImGui (MIT),
+Vulkan Memory Allocator (MIT), SMAA (MIT), AMD FSR 1 (MIT), the Baloo 2 and BIZ UDPGothic fonts (SIL OFL 1.1), the DejaVu Sans font (Bitstream Vera / DejaVu license), SDL 3 (zlib), FFmpeg (LGPL 2.1+, linked dynamically), the
+Zig compiler (MIT; its LLVM / Clang / LLD: Apache 2.0 with LLVM exceptions; its C library headers keep their own
+licenses), and the generator helpers' bundled libraries listed under Credits (oead / evfl / Keystone in the seed
+generator and Unicorn in the game code generator are under the GPL, versions in the table below: each helper is a separate program the game runs, and its
+sources are this repository plus those projects' published sources). The license covers LAS Recomp's code only - it grants
+nothing for Nintendo's game, which you must supply yourself.
 
-If I've missed your name, that doesn't mean your help went unnoticed. This is a growing community effort, and I appreciate everyone who has helped get it this far.
+### Source code of bundled third-party components
 
-**The community isn't just testing this project—it is helping shape what it can become.**
+Release builds include these components; their source code for the exact versions shipped is available here:
 
-## 📜 Licensing, attribution, and legal notice
+| Component | Version | License | Source |
+|---|---|---|---|
+| Keystone (seed generator) | 0.9.2 | GPL 2.0 | https://github.com/keystone-engine/keystone/releases/tag/0.9.2 |
+| oead (seed generator) | 1.3.0 | GPL 2.0+ | https://github.com/zeldamods/oead/releases/tag/v1.3.0 |
+| evfl (seed generator) | 1.2.0 | GPL 2.0+ | https://github.com/zeldamods/evfl/releases/tag/v1.2.0 |
+| quicktex (seed generator) | 0.2.1 | LGPL 3.0 | https://github.com/drewcassidy/quicktex/releases/tag/v0.2.1 |
+| PyInstaller (packs the seed and game code generators) | 6.22.3 | GPL 2.0+ with bootloader exception | https://github.com/pyinstaller/pyinstaller/releases/tag/v6.22.3 |
+| CPython (seed and game code generators) | 3.12.14 (macOS), 3.12.10 (Windows), 3.12.15 (Linux) | PSF | https://github.com/python/cpython/releases/tag/v3.12.14, https://github.com/python/cpython/releases/tag/v3.12.10, https://github.com/python/cpython/releases/tag/v3.12.15 |
+| Zig (builds the game code during setup; includes LLVM, Clang, LLD) | 0.17.0 | MIT; LLVM: Apache 2.0 with LLVM exceptions | https://ziglang.org/download/0.17.0/zig-0.17.0.tar.xz |
+| Capstone (game code generator) | 5.0.9 | BSD 3-clause | https://pypi.org/project/capstone/5.0.9/ |
+| Unicorn (game code generator) | 2.1.4 | GPL 2.0 (Python bindings: BSD) | https://pypi.org/project/unicorn/2.1.4/, https://github.com/unicorn-engine/unicorn |
+| python-lz4 (game code generator; includes LZ4) | 4.4.5 | BSD 3-clause; LZ4: BSD 2-clause | https://pypi.org/project/lz4/4.4.5/ |
+| FFmpeg (LGPL configuration, macOS, Windows and Linux builds) | 9.0.2 | LGPL 2.1+ | https://ffmpeg.org/releases/ |
+| SDL 3 | 3.4.18 (macOS, Windows), 3.4.16 (Linux) | zlib | https://github.com/libsdl-org/SDL/releases/tag/release-3.4.18, https://github.com/libsdl-org/SDL/releases/tag/release-3.4.16 |
+| shaderc (Windows, Linux: GLSL to SPIR-V; Linux: with glslang, SPIRV-Tools inside) | 2026.4 (Windows), 2026.3 (Linux) | Apache 2.0 | https://github.com/google/shaderc |
+| libiconv (Windows: used by SDL 3) | 1.19 | LGPL 2.1+ | https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.19.tar.gz |
+| GCC runtime: libgcc, libstdc++ (Windows) | 16.2.0 | GPL 3.0 with the GCC Runtime Library Exception | https://gcc.gnu.org/ |
+| winpthreads (Windows, mingw-w64) | 14.0.0 | MIT / BSD | https://www.mingw-w64.org/ |
+| Baloo 2 font (SemiBold) | 1.640 | SIL OFL 1.1 | https://github.com/EkType/Baloo2 |
+| BIZ UDPGothic font (Regular, Linux) | 1.05 (Google Fonts) | SIL OFL 1.1 | https://github.com/googlefonts/morisawa-biz-ud-gothic, https://github.com/google/fonts/tree/main/ofl/bizudpgothic |
+| DejaVu Sans font (Book, Bold) | 2.37 | Bitstream Vera license (DejaVu changes public domain) | https://github.com/dejavu-fonts/dejavu-fonts/releases/tag/version_2_37 |
+| SMAA (shader and lookup textures, built in) | 2013 (repository master) | MIT | https://github.com/iryoku/smaa |
 
-- LA-Online Recomp is an **unofficial fan-made modification/extension**. It is **not affiliated with or endorsed by Nintendo**, the original game's developers, or the upstream LAS Recomp maintainers.
-- **LAS Recomp's own original code is published under the MIT License**, with third-party components retaining their separate licenses. If this repository distributes or modifies upstream code, retain the applicable upstream copyright and license notices and any relevant third-party notices. See the [upstream license](https://github.com/peiikai/LASRecomp/blob/main/LICENSE) and documentation.
-- Any LA-Online-specific licensing terms must be stated in this repository's actual `LICENSE` file; this README does not grant rights beyond the licenses that apply.
-- This project does not grant rights to distribute Nintendo game files, assets, or other protected game material.
-
-## 💙 A final message
-
-I started this because I wanted to share one of my favorite kinds of adventures with my children. I never imagined how much time, troubleshooting, and community effort would go into something as simple-sounding as “let's play Link's Awakening together.”
-
-To the original recompilation developer and contributors: **thank you for building the foundation.**
-
-To Velvet, Sanic, Kit, Raygar, my son, and everyone who has helped test: **thank you for your patience, honesty, ideas, and support.**
-
-And to everyone following the project: thank you for believing that an adventure through Koholint Island could be even more memorable when shared with someone else.
-
-**Made with dedication, for family, friends, and the Zelda community.**
-
-**— ThyHeroOfTime**
+The exact build scripts that fetch and build these (with checksums) are in this repository: `tools/build_deps_macos.sh`,
+`tools/build_deps_windows.sh`, `tools/linux/build_deps.sh` and `tools/rando/rando_gen.spec`. The Windows build takes SDL 3, shaderc, libiconv and the
+compiler runtime from MSYS2's UCRT64 packages (https://packages.msys2.org, which links each package's source).
