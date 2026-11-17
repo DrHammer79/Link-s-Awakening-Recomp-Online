@@ -5,16 +5,19 @@
 // rt_hook returns 0: run the site's own instruction, 1: the hook did it all, 2..: jump to the site's targets
 // (HOOKS[site][1], in order).
 #include "../game_addresses.h"
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "../cpu.h"
+#include "../hle.h"
 #include "../rt.h"
+#include "../settings.h"
 
 void rt_mb_seen(uint64_t o);  // miniboss.c
 int rt_shadow_link_appear(uint64_t o);
-int rt_shadow_link_bgm(uint64_t actor);
+int rt_shadow_link_bgm(void);
 int rt_gohma_free(void);
 uint32_t rt_gohma_heading(uint64_t gohma, uint32_t track);
 int rt_crashout_skip(uint64_t o);
@@ -23,12 +26,22 @@ uint64_t rt_hole_cap(void);
 void rt_frame_job_kickoff(uint64_t owner);  // delegate_null.c
 void rt_frame_job_finish(uint64_t job);
 void rt_owner_call_notify(Cpu *c, uint64_t obj);
+uint32_t rt_powerup_music_flags(Cpu *c, uint32_t flags, bool update);
+uint32_t rt_text_rate(uint32_t game_bits);  // text_speed.c
+int rt_text_snap(void);
+int rt_coop_hook(Cpu *c, int which);  // coop.c (which: the COOP_* site, below)
 
 // The hook sites (game_addresses.h): which one a site is, by the selected game version's table
 #define HOOK_SITES(X) \
     X(MB_SEEN_SITE) \
     X(SHADOW_LINK_APPEAR_SITE) \
     X(SHADOW_LINK_BGM_SITE) \
+    X(LAONLINE_GAMEOVER_SITE) \
+    X(BUFF_MUSIC_PICKUP_SITE) \
+    X(BUFF_MUSIC_FLAGS_SITES_0) \
+    X(BUFF_MUSIC_FLAGS_SITES_1) \
+    X(BUFF_MUSIC_FLAGS_SITES_2) \
+    X(BUFF_MUSIC_FLAGS_SITES_3) \
     X(ACTOR_EVENT_SITE) \
     X(CRASHOUT_SITE) \
     X(GOHMA_HEADING_SITES_0) \
@@ -50,7 +63,69 @@ void rt_owner_call_notify(Cpu *c, uint64_t obj);
     X(FRAME_JOB_FINISH_SITE) \
     X(SHAPE_SIM_SITES_0) \
     X(SHAPE_SIM_SITES_1) \
-    X(EFFECT_BONE_SITE)
+    X(EFFECT_BONE_SITE) \
+    X(TEXT_RATE_SITE) \
+    X(TEXT_SNAP_SITE) \
+    X(COOP_CREATE_SITE) \
+    X(COOP_ZONE_SITE) \
+    X(COOP_DUP_SITE) \
+    X(COOP_PLACE_SITE) \
+    X(COOP_PLACE_PLAYER_SITE) \
+    X(COOP_SPAWN_CHECK_SITE) \
+    X(COOP_CTRL_SITE) \
+    X(COOP_COLOR_SITE) \
+    X(COOP_ENTER_SITE) \
+    X(COOP_SCROLL_SITE) \
+    X(COOP_PAD_STATE_SITE) \
+    X(COOP_APPLET_SITE) \
+    X(COOP_APPLET_SINGLE_SITE) \
+    X(COOP_CCT_SWEEP_SITE_0) \
+    X(COOP_CCT_SWEEP_SITE_1) \
+    X(COOP_ACTOR_EXEC_SITE) \
+    X(COOP_ACTOR_EXEC_DONE) \
+    X(COOP_CAMERA_SITE) \
+    X(COOP_HEAL_SITE_0) \
+    X(COOP_HEAL_SITE_1) \
+    X(COOP_EXIT_TOUCH_SITE) \
+    X(COOP_STAIRS_TOUCH_SITE) \
+    X(COOP_STAIRS_LEAVE_SITE) \
+    X(COOP_EXIT_LEAVE_SITE) \
+    X(COOP_EXIT_LEAVE_CLEAR) \
+    X(COOP_CAMERA_SCROLL_SITE) \
+    X(COOP_DOACTION_SITE) \
+    X(COOP_DOACTION_FRAME_SITE) \
+    X(COOP_DOACTION_GET_SITE) \
+    X(COOP_EVENT_BOX_SITE) \
+    X(COOP_WARP_HOLE_TOUCH_SITE) \
+    X(COOP_WARP_HOLE_LEAVE_SITE) \
+    X(COOP_DEAD_STATE_SITE) \
+    X(COOP_LOAD_BOX_SITE) \
+    X(COOP_KEEP_BOX_SITE) \
+    X(COOP_ACTIVE_BOX_SITE) \
+    X(COOP_WARP_OBJ_TOUCH_SITE) \
+    X(COOP_WARP_OBJ_LEAVE_SITE) \
+    X(COOP_SHADOW_BOX_SITE) \
+    X(COOP_TILE_PLAYER_SITE) \
+    X(COOP_LIKELIKE_SITE_0) \
+    X(COOP_LIKELIKE_SITE_1) \
+    X(COOP_LIKELIKE_SITE_2) \
+    X(COOP_LIKELIKE_SITE_3) \
+    X(COOP_LIKELIKE_SITE_4) \
+    X(COOP_LIKELIKE_SITE_5) \
+    X(COOP_LIKELIKE_SITE_6) \
+    X(COOP_LIKELIKE_SITE_7) \
+    X(COOP_LIKELIKE_SITE_8) \
+    X(COOP_DAMAGE_HALVED_SITE) \
+    X(COOP_RESTART_SITE) \
+    X(COOP_ACTOR_TYPE_SITE) \
+    X(COOP_ACTOR_GONE_SITE) \
+    X(COOP_PART_SITE_0) \
+    X(COOP_PART_SITE_1) \
+    X(COOP_PART_SITE_2) \
+    X(COOP_PART_GONE_SITE_0) \
+    X(COOP_PART_GONE_SITE_1) \
+    X(COOP_CULL_SITE) \
+    X(COOP_JOIN_CAMERA_SITE)
 enum {
 #define X(name) H_##name,
     HOOK_SITES(X)
@@ -62,24 +137,50 @@ static const size_t hook_field[] = {
 #undef X
 };
 
+// Some sites run hundreds of times a frame (an actor's update): the last lookups are kept, site << 8 | id + 1 in one
+// word (any thread).
+static _Atomic uint64_t hook_cache[64];
+RT_ON_RESET(hook_cache_reset) { for (int i = 0; i < 64; i++) hook_cache[i] = 0; }
+
 static int hook_id(uint64_t site) {
+    _Atomic uint64_t *slot = &hook_cache[(site >> 2) & 63];
+    uint64_t e = atomic_load_explicit(slot, memory_order_relaxed);
+    if (e >> 8 == site) return (int)(e & 0xff) - 1;
     for (size_t i = 0; i < sizeof hook_field / sizeof hook_field[0]; i++)
-        if (*(const uint64_t *)((const char *)g_ga + hook_field[i]) == site) return (int)i;
+        if (*(const uint64_t *)((const char *)g_ga + hook_field[i]) == site) {
+            atomic_store_explicit(slot, site << 8 | (i + 1), memory_order_relaxed);
+            return (int)i;
+        }
     return -1;
 }
 
 int rt_hook(Cpu *c, uint64_t site) {
-    if(game_version()&&!strcmp(game_version()->key,"v1_0_0")&&site==MAIN_BASE+0xdab000){
-        extern void laonline_death_native(Cpu *);laonline_death_native(c);return 0;
-    }
-    switch (hook_id(site)) {
+    int id = hook_id(site);
+    switch (id) {
     case H_MB_SEEN_SITE:  // MB_SEEN_SITE - ldr x8, [x21]: an actor seen
         rt_mb_seen(c->x[21]);
         return 0;
     case H_SHADOW_LINK_APPEAR_SITE:  // SHADOW_LINK_APPEAR_SITE - ldr x9, [x0, #0x230]: his Appear event, none on the Field
         return rt_shadow_link_appear(c->x[0]) ? 2 : 0;
     case H_SHADOW_LINK_BGM_SITE:  // SHADOW_LINK_BGM_SITE - bl main+0xce8ce0: his chamber music, only in the chamber
-        return rt_shadow_link_bgm(c->x[20]);
+        return rt_shadow_link_bgm();
+    case H_LAONLINE_GAMEOVER_SITE: {  // LAONLINE_GAMEOVER_SITE - ldr x20, [sp, #0x18]: the Game Over event submitted
+        extern void laonline_death_native(Cpu *c);  // (online play tells the others: laonline_death.c)
+        extern bool laonline_configured(void);
+        if (laonline_configured()) laonline_death_native(c);
+        return 0;
+    }
+    case H_BUFF_MUSIC_PICKUP_SITE:
+        return !g_settings.powerup_music;
+    case H_BUFF_MUSIC_FLAGS_SITES_0:
+    case H_BUFF_MUSIC_FLAGS_SITES_1:
+    case H_BUFF_MUSIC_FLAGS_SITES_2:
+    case H_BUFF_MUSIC_FLAGS_SITES_3: {
+        int reg = site == GA(BUFF_MUSIC_FLAGS_SITES_1) ? 20 : 21;
+        uint32_t flags = LD32(c->x[8] + 0x1b8c);
+        c->x[reg] = rt_powerup_music_flags(c, flags, site == GA(BUFF_MUSIC_FLAGS_SITES_0));
+        return 1;
+    }
     case H_ACTOR_EVENT_SITE: {  // ACTOR_EVENT_SITE - bl main+0x80c290: an actor's event request (quick pickups)
         extern int rt_actor_event(Cpu *c);
         return rt_actor_event(c);
@@ -124,6 +225,11 @@ int rt_hook(Cpu *c, uint64_t site) {
         if (c->x[0]) return 0;
         LOG("[event] empty handler skipped (issue #41)\n");
         return 2;  // (the dispatcher's catch: returns 0)
+    case H_TEXT_RATE_SITE:  // TEXT_RATE_SITE - str w8, [x0, #0x284]: a message pane's text step (Text speed, #681)
+        ST32(c->x[0] + 0x284, rt_text_rate((uint32_t)c->x[8]));
+        return 1;
+    case H_TEXT_SNAP_SITE:  // TEXT_SNAP_SITE - b.lt: text short of the page's end; Instant takes the "at the end" path
+        return rt_text_snap();
     case H_CHOICE_COUNT_SITE: {  // CHOICE_COUNT_SITE - str w8, [x19, #0x1cc4]: a question's answer count (issue #183)
         int32_t n = (int32_t)c->x[8];
         if (n >= 2 && n <= 4) return 0;
@@ -171,6 +277,26 @@ int rt_hook(Cpu *c, uint64_t site) {
         last = c->x[22];
         return 2;
     }
+    // Local co-op (runtime/hle/coop.c): with co-op off every site runs its own instruction
+    case H_COOP_CREATE_SITE: case H_COOP_ZONE_SITE: case H_COOP_DUP_SITE: case H_COOP_PLACE_SITE:
+    case H_COOP_PLACE_PLAYER_SITE: case H_COOP_SPAWN_CHECK_SITE: case H_COOP_CTRL_SITE: case H_COOP_COLOR_SITE:
+    case H_COOP_ENTER_SITE: case H_COOP_SCROLL_SITE: case H_COOP_PAD_STATE_SITE: case H_COOP_APPLET_SITE:
+    case H_COOP_APPLET_SINGLE_SITE: case H_COOP_CCT_SWEEP_SITE_0: case H_COOP_CCT_SWEEP_SITE_1:
+    case H_COOP_ACTOR_EXEC_SITE: case H_COOP_ACTOR_EXEC_DONE: case H_COOP_CAMERA_SITE: case H_COOP_HEAL_SITE_0:
+    case H_COOP_HEAL_SITE_1: case H_COOP_EXIT_TOUCH_SITE: case H_COOP_STAIRS_TOUCH_SITE:
+    case H_COOP_STAIRS_LEAVE_SITE: case H_COOP_EXIT_LEAVE_SITE: case H_COOP_EXIT_LEAVE_CLEAR:
+    case H_COOP_CAMERA_SCROLL_SITE: case H_COOP_DOACTION_SITE: case H_COOP_DOACTION_FRAME_SITE:
+    case H_COOP_DOACTION_GET_SITE: case H_COOP_EVENT_BOX_SITE:
+    case H_COOP_WARP_HOLE_TOUCH_SITE: case H_COOP_WARP_HOLE_LEAVE_SITE: case H_COOP_DEAD_STATE_SITE:
+    case H_COOP_LOAD_BOX_SITE: case H_COOP_KEEP_BOX_SITE: case H_COOP_ACTIVE_BOX_SITE:
+    case H_COOP_WARP_OBJ_TOUCH_SITE: case H_COOP_WARP_OBJ_LEAVE_SITE: case H_COOP_SHADOW_BOX_SITE:
+    case H_COOP_TILE_PLAYER_SITE: case H_COOP_LIKELIKE_SITE_0: case H_COOP_LIKELIKE_SITE_1:
+    case H_COOP_LIKELIKE_SITE_2: case H_COOP_LIKELIKE_SITE_3: case H_COOP_LIKELIKE_SITE_4: case H_COOP_LIKELIKE_SITE_5:
+    case H_COOP_LIKELIKE_SITE_6: case H_COOP_LIKELIKE_SITE_7: case H_COOP_LIKELIKE_SITE_8:
+    case H_COOP_DAMAGE_HALVED_SITE: case H_COOP_RESTART_SITE: case H_COOP_ACTOR_TYPE_SITE: case H_COOP_ACTOR_GONE_SITE:
+    case H_COOP_PART_SITE_0: case H_COOP_PART_SITE_1: case H_COOP_PART_SITE_2: case H_COOP_PART_GONE_SITE_0:
+    case H_COOP_PART_GONE_SITE_1: case H_COOP_CULL_SITE: case H_COOP_JOIN_CAMERA_SITE:
+        return rt_coop_hook(c, id - H_COOP_CREATE_SITE);
     }
     return 0;
 }

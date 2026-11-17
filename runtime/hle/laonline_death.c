@@ -30,7 +30,7 @@ void laonline_death_context(uint16_t map,uint16_t room,int alive){
  pthread_mutex_unlock(&mx);
 }
 void laonline_death_native(Cpu *c){
- if(!g_ga||!game_version()||strcmp(game_version()->key,"v1_0_0"))return;
+ if(!g_ga||!game_version())return;
  uint64_t mgr=LD64(GA(GAME_MGR));if(!mgr||LD64(mgr+0x4b8)!=c->x[19])return;
  // Both native request construction and manager submission must have succeeded.
  if(c->sp<GUEST_LO||c->sp>GUEST_HI-0xa0||!LD64(c->sp+0x20)||!LD64(c->sp+0x10))return;

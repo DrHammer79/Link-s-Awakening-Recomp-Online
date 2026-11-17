@@ -57,7 +57,6 @@ typedef int sock_t;
 #include "../laonline_build.h"
 #include "../hle.h"
 #include "../settings.h"
-#include "../laonline_report_send.h"
 #include "../cosmetic_colour.h"
 #include "laonline_session.h"
 #include "laonline_location.h"
@@ -139,7 +138,6 @@ static void set_kv(const char *k, const char *v) {
     else if (!strcmp(k, "server")) snprintf(g_cfg.server, sizeof g_cfg.server, "%s", v);
     else if (!strcmp(k, "lobby")) snprintf(g_cfg.lobby, sizeof g_cfg.lobby, "%s", v);
     else if (!strcmp(k, "password")) snprintf(g_cfg.password, sizeof g_cfg.password, "%s", v);
-    else if (!strcmp(k, "report_url")) laonline_report_configure(v);
     else if (!strcmp(k, "name")) snprintf(g_cfg.name, sizeof g_cfg.name, "%s", v);
     else if (!strcmp(k, "port")) g_cfg.port = atoi(v);
     else if (!strcmp(k, "peer")) snprintf(g_cfg.peer, sizeof g_cfg.peer, "%s", v);
@@ -165,6 +163,10 @@ static void load_config(void) {
     if (ENV("LAONLINE_MODE")) set_kv("mode", ENV("LAONLINE_MODE"));
     if (ENV("LAONLINE_PEER")) set_kv("peer", ENV("LAONLINE_PEER"));
     if (ENV("LAONLINE_PORT")) set_kv("port", ENV("LAONLINE_PORT"));
+    // (LAS Recomp Co-Op's port: the relay's address and the name too - two copies on one PC share the data root's
+    // laonline.ini; tools/coop_tests/online_relay.sh)
+    if (ENV("LAONLINE_SERVER")) set_kv("server", ENV("LAONLINE_SERVER"));
+    if (ENV("LAONLINE_NAME")) set_kv("name", ENV("LAONLINE_NAME"));
 }
 
 // ---------------------------------------------------------------- network (non-blocking UDP, polled on the game thread)
@@ -333,13 +335,12 @@ static bool remote_room_pair(Cpu *c, const char *level, uint64_t *room, uint64_t
 static uint64_t g_position_set, g_rotation_set;
 static bool native_adapter_ready(void) {
     if (!g_ga) return false;
-    if (LD32(MAIN_BASE + LAO_SHADOW_UPDATE_OFF) != 0xd10103ffu ||
-        LD32(MAIN_BASE + LAO_PLAY_ANIMATION_OFF) != 0xd10183ffu ||
-        LD32(MAIN_BASE + LAO_POP_VISUAL_OFF) != 0xf81e0ff3u) return false;
-    /* Resolve relocated transform helpers from verified Shadow Link BL sites,
-     * rather than assume the +0xd0 version shift applies to every function. */
-    g_position_set = lao_bl_target(MAIN_BASE + 0xd15b08u, LD32(MAIN_BASE + 0xd15b08u));
-    g_rotation_set = lao_bl_target(MAIN_BASE + 0xd106c8u, LD32(MAIN_BASE + 0xd106c8u));
+    if (LD32(GA(LAONLINE_SHADOW_UPDATE_SITE)) != 0xd10103ffu ||
+        LD32(GA(LAONLINE_ANIMATION_SITE)) != 0xd10183ffu ||
+        LD32(GA(LAONLINE_SL_POP)) != 0xf81e0ff3u) return false;
+    /* The transform's setters, from the calls Shadow Link's own code makes to them. */
+    g_position_set = lao_bl_target(GA(LAONLINE_SL_POSITION_CALL), LD32(GA(LAONLINE_SL_POSITION_CALL)));
+    g_rotation_set = lao_bl_target(GA(LAONLINE_SL_ROTATION_CALL), LD32(GA(LAONLINE_SL_ROTATION_CALL)));
     return g_position_set >= MAIN_BASE && g_position_set < SDK_BASE &&
            g_rotation_set >= MAIN_BASE && g_rotation_set < SDK_BASE;
 }
@@ -349,7 +350,12 @@ static uint64_t g_local_anim_at;
 void laonline_native_animation(Cpu *c) {
     if (!g_ga || c->x[2] != 0 || c->x[1] > 0xffffu) return;
     uint64_t mgr = LD64(GA(GAME_MGR)), link = mgr ? LD64(mgr + 0x4b8) : 0;
-    if (!link || LD64(link + LAO_LOCAL_ANIMATION_OFF) != c->x[0]) return;
+    if (!link || LD64(link + LAO_LOCAL_ANIMATION_OFF) != c->x[0]) {
+        // (LAS Recomp Co-Op's port: or another local co-op player's Link - sent on his own connection, laonline_local.c)
+        extern void laonline_local_animation(uint64_t player, uint16_t anim);
+        laonline_local_animation(c->x[0], (uint16_t)c->x[1]);
+        return;
+    }
     g_local_anim = (uint16_t)c->x[1];
     g_local_anim_flags = (g_local_anim_flags ^ LAO_ANIMATION_EVENT) | LAO_ANIMATION_VALID;
     g_local_anim_at = plat_now_ns() / 1000000ull;
@@ -391,7 +397,7 @@ int laonline_local_play_anim(Cpu *c, uint16_t id) {  /* play one of Link's own a
     if (!(anim >= HEAP_BASE && anim < HEAP_BASE + HEAP_MAX)) return 0;
     Cpu saved = *c;
     c->x[0] = anim; c->x[1] = id; c->x[2] = 0; c->v[0] = 0;
-    guest_call(c, MAIN_BASE + LAO_PLAY_ANIMATION_OFF);
+    guest_call(c, GA(LAONLINE_ANIMATION_SITE));
     *c = saved;
     return 1;
 }
@@ -402,17 +408,17 @@ int laonline_local_play_anim(Cpu *c, uint16_t id) {  /* play one of Link's own a
  * Use the component's own enable API so its PhysX filters are updated too;
  * clearing an actor byte alone would leave stale collision shapes behind. */
 static void puppet_collision_off(Cpu *c) {
-    const GameVersion *v=game_version();
-    if(!v || strcmp(v->key,"v1_0_0") || !g_rp.obj || !weak_alive(g_rp.ctrl) ||
+    uint64_t set_enabled=GA(LAONLINE_COLLIDER_SET_ENABLED);
+    if(!set_enabled || !g_rp.obj || !weak_alive(g_rp.ctrl) ||
        LD64(g_rp.obj)!=GA(SHADOW_LINK_VTABLE))return;
     uint64_t comp=LD64(g_rp.obj+0x1630u);
     if(comp<HEAP_BASE || comp>HEAP_BASE+HEAP_MAX-0x300 ||
-       LD64(comp)!=MAIN_BASE+0x1c17278u ||
-       LD64(LD64(comp)+0xa8)!=MAIN_BASE+0x10b5d40u ||
-       LD32(MAIN_BASE+0x10b5d40u)!=0x39473009u ||
-       LD32(MAIN_BASE+0x10b5d44u)!=0x12000028u || !LD8(comp+0x1cc))return;
+       LD64(comp)!=GA(LAONLINE_COLLIDER_VT) ||
+       LD64(LD64(comp)+0xa8)!=set_enabled ||
+       LD32(set_enabled)!=0x39473009u ||
+       LD32(set_enabled+4)!=0x12000028u || !LD8(comp+0x1cc))return;
     Cpu saved=*c;c->x[0]=comp;c->x[1]=0;
-    guest_call(c,MAIN_BASE+0x10b5d40u);*c=saved;
+    guest_call(c,set_enabled);*c=saved;
     laonline_diag("puppet.collision_disable_readback",g_rp.map_id,g_rp.room_id,g_rp.obj,1,LD8(comp+0x1cc));
     LOG("[laonline] remote Link collision disabled peer=%u native_enabled=%u\n",g_rp.st.id,LD8(comp+0x1cc));
 }
@@ -429,9 +435,8 @@ static uint64_t g_ghost_obj[LAO_PLAYERS],g_ghost_comp[LAO_PLAYERS][GHOST_MAX],g_
 static int g_ghost_n[LAO_PLAYERS];
 static int ghost_heap(uint64_t p,uint64_t size){return p>=HEAP_BASE&&p+size<HEAP_BASE+HEAP_MAX;}
 static void puppet_ghost(Cpu *c,const char *level){
-    const GameVersion *v=game_version();
     unsigned slot=g_puppet_slot;
-    if(!laonline_v12_ghost_level(level)||!v||strcmp(v->key,"v1_0_0")||!g_rp.obj||!weak_alive(g_rp.ctrl)||
+    if(!laonline_v12_ghost_level(level)||!g_ga||!g_rp.obj||!weak_alive(g_rp.ctrl)||
        g_rp.phase!=2||LD64(g_rp.obj)!=GA(SHADOW_LINK_VTABLE))return;
     if(g_ghost_obj[slot]!=g_rp.obj){
         g_ghost_obj[slot]=g_rp.obj;g_ghost_n[slot]=0;
@@ -652,17 +657,17 @@ static void puppet_tick(Cpu *c, uint64_t frame, const char *level, const char *r
     }
     {   /* V7: he is set up by his own code, then popped up once (his Pop entry: body shown, rising animation,
          * attack and body-hit components off) and his own update is skipped from then on. If anything hides
-         * him again (+0x1700 = 0: his "shown" mark, set by main+0xd14820), he is shown again, hits off. */
+         * him again (+0x1700 = 0: his "shown" mark, set by LAONLINE_SL_SHOW), he is shown again, hits off. */
         uint64_t now = plat_now_ns() / 1000000ull;
         uint8_t st = LD8(g_rp.obj + SL_SM + 0xd);
         if (g_rp.phase == 0 && st != 0xff && now - g_rp.phase_at >= 300) {
             Cpu caller = *c;
             bool joining = g_rp.popped_id != g_rp.st.id;
             if (joining) {  /* he just joined: his rising-out-of-the-shadow entrance */
-                c->x[0] = g_rp.obj; guest_call(c, MAIN_BASE + LAO_POP_VISUAL_OFF);
+                c->x[0] = g_rp.obj; guest_call(c, GA(LAONLINE_SL_POP));
                 g_rp.popped_id = g_rp.st.id;
             } else {                              /* a door / room reload: just there, no entrance */
-                c->x[0] = g_rp.obj; c->x[1] = 1; guest_call(c, MAIN_BASE + 0xd14820u);
+                c->x[0] = g_rp.obj; c->x[1] = 1; guest_call(c, GA(LAONLINE_SL_SHOW));
                 for (int k = 0; k < 2; k++) {
                     uint64_t comp = LD64(g_rp.obj + (k ? 0x1690u : 0x16a0u));
                     if (comp) { c->x[0] = comp; c->x[1] = 0; guest_call(c, LD64(LD64(comp) + 0xa8)); }
@@ -676,7 +681,7 @@ static void puppet_tick(Cpu *c, uint64_t frame, const char *level, const char *r
             if (!quiet) g_rp.arrival_at = now + 600;  /* (rise, then network animations) */
             /* V8: his brain off on every PC, with or without the update hook: each of his 15 states' "update"
              * (state machine at +0xff0, state i at +0x30*i: update member function at +0x58/+0x60, used when
-             * bit i of +0x560 is clear - main+0xd0b040) now points at an empty function (main+0xd10050: ret).
+             * bit i of +0x560 is clear - main+0xd0b040) now points at an empty function (LAONLINE_SL_STATE_NOP: ret).
              * Only this actor's own table is changed; no state can then decide to chase or attack. */
             {
                 uint64_t sm = g_rp.obj + SL_SM;
@@ -684,7 +689,7 @@ static void puppet_tick(Cpu *c, uint64_t frame, const char *level, const char *r
                 for (int i = 0; i < 15; i++) {
                     if (LD8(sm + 0x560 + (i >> 3)) & (1u << (i & 7))) continue;
                     if (!LD64(sm + 0x30 * i + 0x58)) continue;
-                    ST64(sm + 0x30 * i + 0x58, 0x7000d10050ull), ST64(sm + 0x30 * i + 0x60, 0), n++;
+                    ST64(sm + 0x30 * i + 0x58, GA(LAONLINE_SL_STATE_NOP)), ST64(sm + 0x30 * i + 0x60, 0), n++;
                 }
                 LOG("[laonline] v8: %d of his states made empty (no chasing, no attacks)\n", n);
             }
@@ -698,7 +703,7 @@ static void puppet_tick(Cpu *c, uint64_t frame, const char *level, const char *r
             return;
         } else if (g_rp.phase == 2 && !LD8(g_rp.obj + 0x1700) && frame % 30 == 0) {
             Cpu caller = *c;
-            c->x[0] = g_rp.obj; c->x[1] = 1; guest_call(c, MAIN_BASE + 0xd14820u);  /* show */
+            c->x[0] = g_rp.obj; c->x[1] = 1; guest_call(c, GA(LAONLINE_SL_SHOW));  /* show */
             for (int k = 0; k < 2; k++) {  /* attack / body-hit components off, as his Pop entry does */
                 uint64_t comp = LD64(g_rp.obj + (k ? 0x1690u : 0x16a0u));
                 if (comp) { c->x[0] = comp; c->x[1] = 0; guest_call(c, LD64(LD64(comp) + 0xa8)); }
@@ -736,7 +741,7 @@ static void puppet_tick(Cpu *c, uint64_t frame, const char *level, const char *r
             uint64_t animation = LD64(g_rp.obj + LAO_REMOTE_ANIMATION_OFF);
             if (animation) {
                 c->x[0] = animation; c->x[1] = id; c->x[2] = 0; c->v[0] = 0;
-                guest_call(c, MAIN_BASE + LAO_PLAY_ANIMATION_OFF);
+                guest_call(c, GA(LAONLINE_ANIMATION_SITE));
                 if (c->x[0]) { g_rp.anim_id = id; g_rp.anim_flags = g_rp.wire.flags; }
             }
         }
@@ -923,6 +928,10 @@ static int get_str(const uint8_t *b, int len, int *o, char *out, size_t cap) {
 
 static void srv_handle(const uint8_t *b, int len) {
     if (len <= 0) return;
+    // (LAS Recomp Co-Op's port: a message about one of this PC's other local players - on the relay as players of their
+    // own, laonline_local.c - is not about a remote player: no puppet, no name tag, no "joined")
+    extern int laonline_local_peer_message(const uint8_t *, int);
+    if (laonline_local_peer_message(b, len)) return;
     laonline_v12_message(b,(size_t)len);  /* V12 (before the Global filter: PvP frames are Global's) */
     if(atomic_load(&g_launch_online)==3 && b[0]!=0x81 && b[0]!=0x82 && b[0]!=0x83 && b[0]!=0x84 && b[0]!=0x89 && b[0]!=0x8a && b[0]!=0x8b && b[0]!=0x8c && b[0]!=0x8d && b[0]!=0x8f && b[0]!=LAO_CHAT_RECEIVE && b[0]!=LAO_TYPING_RECEIVE)return;
     pthread_mutex_lock(&g_srv_lock);
@@ -1063,6 +1072,23 @@ int laonline_seed_descriptor(char *id,size_t idcap,char *world,size_t worldcap,i
 
 int laonline_seed_metadata_named(const char *folder,const char *name,char *id,size_t idcap,char *error,size_t cap){char display[96];snprintf(display,sizeof display,"%s",name);return seed_metadata_request(folder,id,idcap,NULL,0,NULL,NULL,display,sizeof display,error,cap);}
 int laonline_seed_descriptor_named(char *id,size_t idcap,char *world,size_t worldcap,int *total,int *ready,char *display,size_t displaycap,char *error,size_t cap){return seed_metadata_request(NULL,id,idcap,world,worldcap,total,ready,display,displaycap,error,cap);}
+// LAS Recomp Co-Op's port: the relay login srv_thread uses - its address, name, lobby (the Randomizer's ".rando" one too)
+// and password - for this PC's other local players' own connections (laonline_local.c). 0 unless online play is
+// launched in relay mode (not Global).
+int laonline_relay_login(char *host, size_t hn, char *port, size_t pn, char *name, char *lobby, char *password) {
+    int launch = atomic_load(&g_launch_online);
+    if (g_cfg.mode != M_SERVER || launch < 1 || launch > 2) return 0;
+    snprintf(host, hn, "%s", g_cfg.server);
+    snprintf(port, pn, "47620");
+    char *colon = strrchr(host, ':');
+    if (colon) *colon = 0, snprintf(port, pn, "%s", colon + 1);
+    char login_lobby[33];
+    room_login(name, login_lobby, password);
+    if (launch == 2) snprintf(lobby, 33, "%.26s.rando", login_lobby);
+    else snprintf(lobby, 33, "%s", login_lobby);
+    return 1;
+}
+
 static void *srv_thread(void *arg) {
     (void)arg;
 #ifdef _WIN32
@@ -1275,6 +1301,12 @@ static void *srv_thread(void *arg) {
                 if (fl == 0) { g_srv_status = 2; break; }
                 if (have - o - 2 < fl) break;
                 srv_handle(rb + o + 2, fl);
+                {   // (LAS Recomp Co-Op's port: this PC's other local players listed in a WELCOME: not remote players)
+                    extern void laonline_local_hide(LaoSession *);
+                    pthread_mutex_lock(&g_srv_lock);
+                    laonline_local_hide(&g_srv_session);
+                    pthread_mutex_unlock(&g_srv_lock);
+                }
                 o += 2 + fl;
             }
             memmove(rb, rb + o, (size_t)(have - o));
@@ -1375,7 +1407,39 @@ static void publish_roster(const LaoSession *session,const LaoState *state,int h
 }
 
 extern bool laonline_ui_paused(void);
+/* LAS Recomp's start screen has no online choice (LA-Online's own start screen isn't part of this build): a mode set in
+ * laonline.ini or LAONLINE_MODE starts online play as the game does - co-op, or co-op randomizer while a seed is played
+ * - as choosing it there would (laonline_launch_mode). Once, at the first game frame. */
+static void launch_from_config(void) {
+    static int done;
+    if (done || atomic_load(&g_launch_online)) return;
+    done = 1;
+    load_config();
+    if (g_cfg.mode == M_OFF) return;
+    extern const char *rando_seed_dir(void);
+    laonline_launch_mode(rando_seed_dir() ? 2 : 1);
+}
+
+// Online play set up at all: laonline.ini or LAONLINE_MODE sets a mode (the config launch_from_config reads). The rest
+// of the game calls into online play only behind this (main.c, warp.c, input.c, bindings.c, souls.c, miniboss.c,
+// hooks.c, movie.c, fs.c), so without it the game runs as it does without online play: no journal file, no
+// Z-targeting, F6 to F8 free to bind (LAS Recomp's review, point 4: play with the feature off stays identical). Worked
+// out once, by main.c at boot before the other threads start (after rt_paths_init: the data root's laonline.ini).
+// g_laonline_on is the same, for the game code's patches (tools/patches.py: a load, not a call, on paths every actor
+// takes - each animation played).
+bool g_laonline_on;
+bool laonline_configured(void) {
+    static int known = -1;
+    if (known < 0) {
+        load_config();
+        known = g_cfg.mode != M_OFF;
+        g_laonline_on = known;
+    }
+    return known;
+}
+
 void laonline_tick(Cpu *c, uint64_t frame) {
+    launch_from_config();
     if (!atomic_load(&g_launch_online)) return;
     static int init;
     if (!init) {
@@ -1388,7 +1452,11 @@ void laonline_tick(Cpu *c, uint64_t frame) {
             g_cfg.mode = M_OFF;
         }
         if (g_cfg.mode == M_OFF) return;
-        g_my_id = (uint32_t)rand() ^ (uint32_t)(uintptr_t)&init ^ (uint32_t)frame * 2654435761u;
+        // This PC's player id, from the OS's random source (runtime/platform/*_compat.h). It was rand() (never seeded:
+        // the same first value in every process) ^ this variable's address (one per boot on Windows) ^ the frame (1,
+        // the first one): two copies started alike - two on one PC, as tools/coop_tests/online_net.sh runs them -
+        // got the same id and each dropped the other's states as its own (accept_state).
+        do g_my_id = arc4random(); while (!g_my_id);
         if (g_cfg.mode == M_SERVER) {
             pthread_t t;
             if (pthread_create(&t, NULL, srv_thread, NULL) == 0) pthread_detach(t);
@@ -1433,6 +1501,7 @@ void laonline_tick(Cpu *c, uint64_t frame) {
     else laonline_death_context(0xffff,0xffff,0);
     static uint16_t diag_map=0xffff,diag_room=0xffff;
     uint16_t dm=lao_name_id(level),dr=lao_room_id(level,room);
+    { extern void laonline_local_context(uint16_t, uint16_t); laonline_local_context(dm, dr); }  /* (LAS Recomp Co-Op) */
     if(dm!=diag_map || dr!=diag_room){laonline_diag("scene.enter",dm,dr,0,0,1);diag_map=dm;diag_room=dr;}
 
     bool have_me = pc != 0;

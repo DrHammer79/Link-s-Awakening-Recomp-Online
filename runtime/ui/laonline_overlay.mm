@@ -477,7 +477,6 @@ static void draw_inventory_tracker(ImDrawList *dl,ImVec2 display,ImFont *font,fl
  dl->AddText(font,11*scale*fit,ImVec2(x+8*scale,y+h-18*scale),IM_COL32(240,235,215,alpha),counts);
 }
 
-extern "C" void laonline_host_seed_keepalive(void);  /* launcher.mm (V13.5) */
 extern "C" float laonline_v12_hit_flash(void);  /* laonline_v12.c (V13.5 PvP) */
 extern "C" float laonline_v12_killfeed(int i, char *line1, int cap1, char *line2, int cap2);
 extern "C" int laonline_v12_my_kos(int *kills, int *falls);
@@ -490,7 +489,6 @@ extern "C" int laonline_v12_totals(int *kills, int *losses);
  *    assets/laonline-ui/laugh-portrait.png), a funny line written for them, their head-to-head score and a timer bar.
  *    It sits BELOW the minimap and never covers or moves it;
  *  - bottom centre: Kills / Losses (the server's totals for your name). */
-bool tropical_image(const char *name,ImTextureID *id,float *aspect);  /* tropical_ui.mm */
 static void triforce(ImDrawList *dl,ImVec2 c,float r,ImU32 col,ImU32 edge){
     ImVec2 top(c.x,c.y-r),bl(c.x-r*1.05f,c.y+r*.8f),br(c.x+r*1.05f,c.y+r*.8f);
     ImVec2 ml((top.x+bl.x)*.5f,(top.y+bl.y)*.5f),mr((top.x+br.x)*.5f,(top.y+br.y)*.5f),mb((bl.x+br.x)*.5f,bl.y);
@@ -581,9 +579,7 @@ static void draw_kill_feed(ImDrawList *dl,ImVec2 display,ImFont *font,float scal
         dl->AddRectFilledMultiColor(ImVec2(x,y),ImVec2(x+w,y+h),IM_COL32(30,42,54,(int)(225*ca)),IM_COL32(30,42,54,(int)(225*ca)),IM_COL32(14,22,32,(int)(225*ca)),IM_COL32(14,22,32,(int)(225*ca)));
         dl->AddRect(ImVec2(x,y),ImVec2(x+w,y+h),IM_COL32(222,178,84,(int)(220*ca)),12*s,0,1.8f*s);
         dl->PushClipRect(ImVec2(x,y),ImVec2(x+w,y+h),true);
-        ImTextureID tex=0;float asp=1;
-        if(tropical_image("laugh-portrait",&tex,&asp))dl->AddImageRounded(tex,ImVec2(x+pad,y+8*s),ImVec2(x+pad+por,y+8*s+por),ImVec2(0,0),ImVec2(1,1),IM_COL32(255,255,255,al),10*s);
-        else{ImVec2 c(x+pad+por*.5f,y+h*.5f);dl->AddCircleFilled(c,por*.4f,IM_COL32(255,220,120,al));}
+        {ImVec2 c(x+pad+por*.5f,y+h*.5f);dl->AddCircleFilled(c,por*.4f,IM_COL32(255,220,120,al));}
         float ty=y+pad;
         dl->AddText(font,fs,ImVec2(tx+1.5f*s,ty+1.5f*s),IM_COL32(0,0,0,(int)(170*ca)),line,NULL,tw);
         dl->AddText(font,fs,ImVec2(tx,ty),IM_COL32(255,250,238,al),line,NULL,tw);
@@ -698,35 +694,12 @@ static void draw_pvp_effects(ImDrawList *dl,ImVec2 display,float scale){
         }
     }
 }
-extern "C" int lao_update_newer(char *tag,int cap);  /* tropical_ui.mm (V14.1) */
-/* V14.1: a small, calm notice when a newer LA-Online is out - also during gameplay. Shown once per new version for
- * ~18 s at the top centre: older versions can't play online with newer ones, so players learn it right away. */
-static void draw_update_notice(ImDrawList *dl,ImVec2 display,ImFont *font,float scale){
-    static double next_poll=0,shown_at=-1;static char tag[48],shown_tag[48];
-    double now=ImGui::GetTime();
-    if(now>=next_poll){next_poll=now+3;char t[48]="";if(lao_update_newer(t,sizeof t)&&t[0]&&strcmp(t,shown_tag)){snprintf(tag,sizeof tag,"%s",t);snprintf(shown_tag,sizeof shown_tag,"%s",t);shown_at=now;}}
-    if(shown_at<0)return;
-    double age=now-shown_at;const double life=18;if(age>life)return;
-    float a=(float)(age<.6?age/.6:age>life-1?(life-age):1);
-    char title[96];snprintf(title,sizeof title,"LA-Online %s is available",tag);
-    const char *body="Update to keep playing online - press UPDATE NOW on the main menu. Your saves stay the same.";
-    float fs=font->FontSize*.78f*scale,fb=font->FontSize*.66f*scale,pad=14*scale;
-    ImVec2 ts=font->CalcTextSizeA(fs,FLT_MAX,0,title),bs=font->CalcTextSizeA(fb,FLT_MAX,0,body);
-    float w=fmaxf(ts.x,bs.x)+pad*2+10*scale,h=ts.y+bs.y+pad*2+4*scale,x=(display.x-w)*.5f,y=18*scale-(1-a)*10*scale;
-    dl->AddRectFilled(ImVec2(x,y),ImVec2(x+w,y+h),IM_COL32(8,26,48,(int)(225*a)),10*scale);
-    dl->AddRect(ImVec2(x,y),ImVec2(x+w,y+h),IM_COL32(120,190,235,(int)(110*a)),10*scale,0,1.2f*scale);
-    dl->AddRectFilled(ImVec2(x,y+6*scale),ImVec2(x+4*scale,y+h-6*scale),IM_COL32(255,205,90,(int)(230*a)),2*scale);
-    dl->AddText(font,fs,ImVec2(x+pad+6*scale,y+pad),IM_COL32(255,236,190,(int)(255*a)),title);
-    dl->AddText(font,fb,ImVec2(x+pad+6*scale,y+pad+ts.y+4*scale),IM_COL32(205,225,245,(int)(235*a)),body);
-}
 extern "C" void laonline_overlay_draw(ImVec2 display, ImFont *font, float scale) {
-    laonline_host_seed_keepalive();  /* host keeps the room's seed on the server during play */
     { float hit=laonline_v12_hit_flash();  /* V13.5 PvP: red flash when hit */
       if(hit>0){ImDrawList *fg=ImGui::GetForegroundDrawList();int a=(int)(110*fminf(1.f,hit));ImU32 red=IM_COL32(220,20,30,a),clear=IM_COL32(220,20,30,0);
         float w=display.x,h=display.y,e=fminf(w,h)*.18f;
         fg->AddRectFilledMultiColor(ImVec2(0,0),ImVec2(w,e),red,red,clear,clear);fg->AddRectFilledMultiColor(ImVec2(0,h-e),ImVec2(w,h),clear,clear,red,red);
         fg->AddRectFilledMultiColor(ImVec2(0,0),ImVec2(e,h),red,clear,clear,red);fg->AddRectFilledMultiColor(ImVec2(w-e,0),ImVec2(w,h),clear,red,red,clear);}}
-    if(game_in_play())draw_update_notice(ImGui::GetForegroundDrawList(),display,font,scale);  /* V14.1 */
     if(menu_is_open()) {laonline_chat_input_close();return;}
     ImDrawList *dl = ImGui::GetForegroundDrawList();
     bool paused=laonline_ui_paused();

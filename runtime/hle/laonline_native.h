@@ -1,11 +1,9 @@
 #pragma once
-/* Verified against the owner's 1.0.0 code; runtime fingerprints are mandatory
- * on either supported version. No inference from a game filename or version. */
+/* The game's code and data it uses are named entries of the game-address tables (LAONLINE_*: runtime/game_addresses,
+ * one value per game version); before calling into the game the code still checks their instructions. Here: the
+ * Shadow Link actor's fields and the animation flags. */
 #include <stdint.h>
 #include <math.h>
-#define LAO_SHADOW_UPDATE_OFF 0xd0a970u
-#define LAO_PLAY_ANIMATION_OFF 0xdeca80u
-#define LAO_POP_VISUAL_OFF 0xd117c0u
 #define LAO_LOCAL_ANIMATION_OFF 0x1568u
 #define LAO_REMOTE_ANIMATION_OFF 0x16e0u
 #define LAO_ANIMATION_VALID 0x40u

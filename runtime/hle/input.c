@@ -1,4 +1,3 @@
-#include "dpad_shortcuts.h"
 // Controller input: SDL keyboard/gamepad -> nn::hid Npad state.
 //
 // Both go through the player's bindings (runtime/hle/bindings.c, defaults there: keyboard WASD left stick, arrows
@@ -31,18 +30,38 @@ static _Atomic uint64_t key_buttons, pad_buttons;
 static _Atomic int32_t key_lx, key_ly, key_rx, key_ry, pad_lx, pad_ly, pad_rx, pad_ry;
 static uint8_t keys_down[SDL_SCANCODE_COUNT];
 static SDL_Gamepad *pad;
+#define COOP_PADS 7                      // local co-op: players 2..8's controllers (below, coop_pad_open)
+static SDL_Gamepad *coop_pad[COOP_PADS];
 static _Atomic int64_t sampling;
 static bool host_test;  // scripted runs must not vibrate the user's controller
 
 // Guest IPC threads publish values; only the UI thread touches SDL's pad.
 // The lock also makes paired value snapshots consistent with permission/reset.
+// Per player: local co-op's players 2.. (npad 1..) rumble their own controllers.
 static SDL_SpinLock rumble_lock;
-static RumbleValue rumble_values[2];
+static RumbleValue rumble_values[1 + COOP_PADS][2];
 static bool rumble_allowed = true;
 static _Atomic uint64_t rumble_frame_ms;
 static uint16_t rumble_last_lo, rumble_last_hi;
 static uint64_t rumble_last_ms;
 static bool rumble_warned;
+static _Atomic uint64_t rumble_pulse_until;  // a pulse of our own (input_rumble_pulse): until then, at least this
+static _Atomic uint32_t rumble_pulse_amp;    // (lo << 16 | hi)
+// A short rumble of our own (the Storm weather's thunder, runtime/nvn/weather.c): mixed in like the game's, with the
+// same rules (Rumble setting, its intensity, the menu, focus). Any thread.
+void input_rumble_pulse(uint16_t lo, uint16_t hi, uint32_t ms) {
+    atomic_store(&rumble_pulse_amp, (uint32_t)lo << 16 | hi);
+    atomic_store(&rumble_pulse_until, SDL_GetTicks() + ms);
+}
+
+static uint16_t coop_rumble_last[COOP_PADS][2];  // (players 2..: as rumble_last_lo / _hi / _ms for theirs)
+static uint64_t coop_rumble_ms[COOP_PADS];
+
+// A vibration handle's side (rumble_side), -1 if none, and its player (*player: the npad, 0 = Player 1).
+static int rumble_slot(uint32_t h, int *player) {
+    *player = (h & 0xff000000u) ? 0 : (h >> 8) & 255;
+    return *player <= COOP_PADS ? rumble_side(h & ~0xff00u) : -1;
+}
 
 static void rumble_clear(void) {
     SDL_LockSpinlock(&rumble_lock);
@@ -50,19 +69,24 @@ static void rumble_clear(void) {
     SDL_UnlockSpinlock(&rumble_lock);
 }
 void input_rumble_send(uint32_t h, const RumbleValue *v) {
-    int side = rumble_side(h);
+    int p, side = rumble_slot(h, &p);
     SDL_LockSpinlock(&rumble_lock);
     if (side < 0) { SDL_UnlockSpinlock(&rumble_lock); return; }
-    if (rumble_allowed) rumble_values[side] = *v;
+    if (rumble_allowed) rumble_values[p][side] = *v;
     SDL_UnlockSpinlock(&rumble_lock);
 }
 RumbleValue input_rumble_get(uint32_t h) {
     RumbleValue v = {0, 160, 0, 320};
-    int side = rumble_side(h);
+    int p, side = rumble_slot(h, &p);
     SDL_LockSpinlock(&rumble_lock);
-    if (side >= 0 && rumble_allowed) v = rumble_values[side];
+    if (side >= 0 && rumble_allowed) v = rumble_values[p][side];
     SDL_UnlockSpinlock(&rumble_lock);
     return v;  // requested value, not physical motor feedback
+}
+// A vibration device mounted (IPC 211): Player 1's as advertised, another player's while he has a controller.
+bool input_rumble_mounted(uint32_t h) {
+    int p;
+    return rumble_slot(h, &p) >= 0 && (p == 0 || coop_pad[p - 1]);
 }
 void input_rumble_permit(bool allowed) {
     SDL_LockSpinlock(&rumble_lock);
@@ -76,41 +100,60 @@ bool input_rumble_permitted(void) {
     SDL_UnlockSpinlock(&rumble_lock);
     return allowed;
 }
+// One player's controller (g, maybe none) to lo / hi: changed, or renewed every 100 ms while on.
+static void rumble_play(SDL_Gamepad *g, uint16_t lo, uint16_t hi, uint16_t *last_lo, uint16_t *last_hi,
+                        uint64_t *last_ms, bool *warned, uint64_t now) {
+    if (g && (lo != *last_lo || hi != *last_hi || ((lo || hi) && now - *last_ms >= 100))) {
+        if (!SDL_RumbleGamepad(g, lo, hi, (lo || hi) ? 250 : 0) && warned && !*warned) {
+            LOG("[rumble] unavailable: %s\n", SDL_GetError());
+            *warned = true;  // keyboard/non-rumble pads are still usable
+        }
+        *last_ms = now;
+    }
+    *last_lo = lo; *last_hi = hi;
+}
 void input_rumble_poll(void) {
     uint64_t now = SDL_GetTicks();
     uint64_t last_frame = atomic_load(&rumble_frame_ms);
-    uint16_t lo = 0, hi = 0;
     // Switch values are latched until changed: they contain no duration.
     // Renew SDL's 250 ms effect every 100 ms while frames are progressing.
     // A stalled render/UI thread therefore cannot leave an infinite effect.
     // This watchdog is a host policy, not a duration supplied by the game.
-    bool suppress = (now > last_frame && now - last_frame > 250) || !pad || host_test || !g_settings.rumble || menu_is_open() ||
+    bool suppress = (now > last_frame && now - last_frame > 250) || host_test || !g_settings.rumble || menu_is_open() ||
                     !SDL_GetKeyboardFocus();
-    SDL_LockSpinlock(&rumble_lock);
-    if (suppress) memset(rumble_values, 0, sizeof rumble_values);
-    else if (rumble_allowed) {
-        rumble_mix(rumble_values, &lo, &hi);
-        int pct = g_settings.rumble_strength;  // (Controls tab: Intensity)
-        if (pct > 0 && pct < 100) lo = (uint16_t)(lo * pct / 100), hi = (uint16_t)(hi * pct / 100);
-    }
-    SDL_UnlockSpinlock(&rumble_lock);
-    if (pad && (lo != rumble_last_lo || hi != rumble_last_hi ||
-                ((lo || hi) && now - rumble_last_ms >= 100))) {
-        if (!SDL_RumbleGamepad(pad, lo, hi, (lo || hi) ? 250 : 0) && !rumble_warned) {
-            LOG("[rumble] unavailable: %s\n", SDL_GetError());
-            rumble_warned = true;  // keyboard/non-rumble pads are still usable
+    for (int p = 0; p <= COOP_PADS; p++) {  // (Player 1, then local co-op's players 2..)
+        SDL_Gamepad *g = p ? coop_pad[p - 1] : pad;
+        uint16_t lo = 0, hi = 0;
+        SDL_LockSpinlock(&rumble_lock);
+        if (suppress || !g) memset(rumble_values[p], 0, sizeof rumble_values[p]);
+        else if (rumble_allowed) {
+            rumble_mix(rumble_values[p], &lo, &hi);
+            if (now < atomic_load(&rumble_pulse_until)) {  // (the thunder: every player's)
+                uint32_t a = atomic_load(&rumble_pulse_amp);
+                if ((a >> 16) > lo) lo = (uint16_t)(a >> 16);
+                if ((a & 0xFFFF) > hi) hi = (uint16_t)(a & 0xFFFF);
+            }
+            int pct = g_settings.rumble_strength;  // (Controls tab: Intensity)
+            if (pct > 0 && pct < 100) lo = (uint16_t)(lo * pct / 100), hi = (uint16_t)(hi * pct / 100);
         }
-        rumble_last_ms = now;
+        SDL_UnlockSpinlock(&rumble_lock);
+        if (!p) rumble_play(pad, lo, hi, &rumble_last_lo, &rumble_last_hi, &rumble_last_ms, &rumble_warned, now);
+        else rumble_play(g, lo, hi, &coop_rumble_last[p - 1][0], &coop_rumble_last[p - 1][1], &coop_rumble_ms[p - 1],
+                         NULL, now);
     }
-    rumble_last_lo = lo; rumble_last_hi = hi;
 }
-// V13.5 PvP: a short buzz on the controller in use when a teammate's attack hits you (laonline_v12.c).
-void input_hit_rumble(int ms) { if (pad && ms > 0) SDL_RumbleGamepad(pad, 0xB000, 0xD000, (Uint32)ms); }
+// Online PvP: a short buzz on Player 1's controller when another player's attack hits him (laonline_v12.c).
+void input_hit_rumble(int ms) {
+    if (pad && ms > 0) SDL_RumbleGamepad(pad, 0xB000, 0xD000, (Uint32)ms);
+}
 void input_rumble_stop(void) {  // UI thread: also called before normal app exit
     rumble_clear();
     atomic_store(&rumble_frame_ms, 0);
     if (pad) SDL_RumbleGamepad(pad, 0, 0, 0);
     rumble_last_lo = rumble_last_hi = 0;
+    for (int i = 0; i < COOP_PADS; i++)
+        if (coop_pad[i]) SDL_RumbleGamepad(coop_pad[i], 0, 0, 0);
+    memset(coop_rumble_last, 0, sizeof coop_rumble_last);
 }
 RT_ON_RESET(input_rumble_reset) {
     input_rumble_stop();
@@ -205,13 +248,127 @@ static void recompute_pad(void) {
     }
     uint64_t b = 0;
     for (int i = 0; i < BIND_PAD_COUNT; i++)
-        if (g_bind_pad[i] >= 0 && g_bind_pad[i] < PADB_HOST_COUNT && (host >> g_bind_pad[i] & 1)) b |= 1ull << i;
+        if ((unsigned)bind_pad_host(i) < PADB_HOST_COUNT && (host >> bind_pad_host(i) & 1)) b |= 1ull << i;
     pad_buttons = b;
     if (!pad || host_test) { pad_lx = test_lx, pad_ly = test_ly, pad_rx = pad_ry = 0; return; }
     pad_lx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
     pad_ly = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
     pad_rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX);
     pad_ry = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
+}
+
+// Local co-op (runtime/hle/coop.c): Player 1 keeps the keyboard and the first controller (pad); the second, third...
+// controller connected is player 2, 3... (npad 2.., below in fill_state), with the same controller bindings. A slot
+// keeps its controller until it is disconnected; a controller connected later takes the first free slot. (coop_pad:
+// above, with the rumble.)
+static _Atomic uint64_t coop_btn[COOP_PADS];
+static _Atomic int32_t coop_axis[COOP_PADS][4];  // lx, ly, rx, ry
+static _Atomic uint64_t coop_seen[COOP_PADS];    // the buttons the game was last given (coop.c: teleport combo)
+static _Atomic uint64_t coop_script_btn[COOP_PADS];
+static _Atomic int32_t coop_script_axis[COOP_PADS][4];
+
+static int coop_slot_of(SDL_JoystickID id) {
+    for (int i = 0; i < COOP_PADS; i++)
+        if (coop_pad[i] && SDL_GetGamepadID(coop_pad[i]) == id) return i;
+    return -1;
+}
+
+static void coop_recompute(int i) {
+    SDL_Gamepad *g = coop_pad[i];
+    uint32_t host = 0;
+    if (g && !host_test) {
+        for (int k = 0; k < SDL_GAMEPAD_BUTTON_COUNT; k++)
+            if (SDL_GetGamepadButton(g, (SDL_GamepadButton)k)) host |= 1u << k;
+        if (SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) host |= 1u << PADB_LTRIGGER;
+        if (SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) host |= 1u << PADB_RTRIGGER;
+    }
+    uint64_t b = 0;
+    for (int k = 0; k < BIND_PAD_COUNT; k++)
+        if (g_bind_pad[k] >= 0 && g_bind_pad[k] < PADB_HOST_COUNT && (host >> g_bind_pad[k] & 1)) b |= 1ull << k;
+    coop_btn[i] = b;
+    if (!g || host_test) { for (int a = 0; a < 4; a++) coop_axis[i][a] = 0; return; }
+    coop_axis[i][0] = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX);
+    coop_axis[i][1] = -SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY);
+    coop_axis[i][2] = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTX);
+    coop_axis[i][3] = -SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTY);
+}
+
+// What a controller is remembered by for co-op (settings coop_pad_path_N): on the desktop SDL's device path - for an
+// Xbox-type pad its XInput slot, the quadrant its ring lights, a USB port or Bluetooth address for the others. On a
+// phone or tablet (PLAT_TOUCH: iOS, Android), or with no path, its GUID ("guid:<hex>"): the kind of controller - two of
+// the same kind aren't told apart there, and the first to connect goes to the first player it was assigned to.
+static const char *pad_key(SDL_JoystickID id, char *buf, size_t n) {
+    const char *path = PLAT_TOUCH ? NULL : SDL_GetGamepadPathForID(id);
+    if (path && *path) return path;
+    char g[64];
+    SDL_GUIDToString(SDL_GetGamepadGUIDForID(id), g, sizeof g);
+    snprintf(buf, n, "guid:%s", g);
+    return buf;
+}
+
+// The player a controller last played as (pad_key), or -1. (input_assign_begin, below; a join, coop_join_pad) Only with
+// co-op on: alone, Player 1's controller is whichever one is used, as upstream's (#455), whatever was assigned for co-op.
+extern bool coop_enabled(void);
+extern uint32_t coop_joined(void);
+static int pad_saved_player(SDL_JoystickID id) {
+    if (!coop_enabled()) return -1;
+    char buf[80];
+    const char *key = pad_key(id, buf, sizeof buf);
+    for (int k = 0; *key && k < 8; k++)
+        if (!strcmp(key, g_settings.coop_pad_path[k])) return k;
+    return -1;
+}
+
+// A controller that isn't Player 1's, connecting again: back to its player if he is still in the game with no
+// controller (one let go mid-play, or its battery). Others wait to join (coop_join_pad). UI thread.
+static void coop_pad_open(SDL_JoystickID id) {
+    if (!coop_enabled() || (pad && SDL_GetGamepadID(pad) == id) || coop_slot_of(id) >= 0) return;
+    int i = pad_saved_player(id) - 1;
+    if (i < 0 || i >= COOP_PADS || coop_pad[i] || !(coop_joined() >> (i + 1) & 1)) return;
+    coop_pad[i] = SDL_OpenGamepad(id);
+    if (!coop_pad[i]) return;
+    SDL_SetGamepadPlayerIndex(coop_pad[i], i + 1);  // (the controller's own player light, where it has one)
+    LOG("[input] co-op player %d: %s (%s)\n", i + 2, SDL_GetGamepadName(coop_pad[i]),
+        SDL_GetGamepadPath(coop_pad[i]) ? SDL_GetGamepadPath(coop_pad[i]) : "no path");
+    coop_recompute(i);
+}
+
+static void coop_pad_close(SDL_JoystickID id) {
+    int i = coop_slot_of(id);
+    if (i < 0) return;
+    SDL_RumbleGamepad(coop_pad[i], 0, 0, 0);
+    SDL_CloseGamepad(coop_pad[i]);
+    coop_pad[i] = NULL;
+    coop_rumble_last[i][0] = coop_rumble_last[i][1] = 0;
+    coop_recompute(i);
+    LOG("[input] co-op player %d: controller disconnected\n", i + 2);
+}
+
+// The controller player `player` (0 = Player 1) has, by name, or NULL (the co-op rows: runtime/ui/controls_ui.mm, UI
+// thread). On the start screen, before the game's first event (input_handle_event takes the controllers then): the
+// ones connected, in the order they'll be taken.
+static bool pads_scanned;
+const char *input_player_pad_name(int player) {
+    if (!pads_scanned) {
+        int n = 0;
+        SDL_JoystickID *ids = SDL_GetGamepads(&n);
+        const char *name = ids && player >= 0 && player < n ? SDL_GetGamepadNameForID(ids[player]) : NULL;
+        SDL_free(ids);
+        return name;
+    }
+    SDL_Gamepad *g = player == 0 ? pad : player >= 1 && player <= COOP_PADS ? coop_pad[player - 1] : NULL;
+    return g && SDL_GamepadConnected(g) ? SDL_GetGamepadName(g) : NULL;  // (unplugged on the start screen: none)
+}
+
+// The buttons player `player` (1 = player 2) was last given (runtime/hle/coop.c).
+uint64_t input_coop_buttons(int player) {
+    return player >= 1 && player <= COOP_PADS ? coop_seen[player - 1] : 0;
+}
+
+// ... and the ones held on his controller (or his test script) now, given to the game or not (coop.c: an A action of
+// his starts on a press, not on A still held as a talk ends).
+uint64_t input_coop_held(int player) {
+    return player >= 1 && player <= COOP_PADS ? coop_btn[player - 1] | coop_script_btn[player - 1] : 0;
 }
 
 // Every press reaches the game, however short. recompute_pad reads the pad as it is now, so a quick tap whose press
@@ -223,34 +380,91 @@ static _Atomic uint64_t tap_buttons;   // released while unseen: the game's next
 static uint64_t pad_bits(int host) {   // the game buttons bound to host button `host` (SDL button / PADB_*TRIGGER)
     uint64_t b = 0;
     for (int i = 0; i < BIND_PAD_COUNT; i++)
-        if (g_bind_pad[i] == host) b |= 1ull << i;
+        if (bind_pad_host(i) == host) b |= 1ull << i;
     return b;
 }
-static void note_press(uint64_t down, uint64_t up) {
-    if (down) press_unseen |= down;
+static void note_press_in(_Atomic uint64_t *unseen, _Atomic uint64_t *tap, uint64_t down, uint64_t up) {
+    if (down) *unseen |= down;
     if (up) {
-        uint64_t u = atomic_fetch_and(&press_unseen, ~up) & up;
-        if (u) tap_buttons |= u;
+        uint64_t u = atomic_fetch_and(unseen, ~up) & up;
+        if (u) *tap |= u;
     }
 }
+static void note_press(uint64_t down, uint64_t up) { note_press_in(&press_unseen, &tap_buttons, down, up); }
 
-// Forget held keys (the menu took focus); the gamepad is re-read on its next event.
+// The same for local co-op's players 2..: each controller's own (its events here, its polls in coop_fill).
+static _Atomic uint64_t coop_unseen[COOP_PADS], coop_tap[COOP_PADS];
+static void coop_event_press(int i, const SDL_Event *e) {
+    uint64_t down = 0, up = 0;
+    if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e->type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+        uint64_t b = pad_bits(e->gbutton.button);
+        if (e->gbutton.down) down = b; else up = b;
+    } else if (e->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || e->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) {
+        static bool trig[COOP_PADS][2];  // (the triggers as buttons: past half way)
+        int t = e->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER;
+        bool on = e->gaxis.value > 16000;
+        if (on != trig[i][t]) {
+            uint64_t b = pad_bits(PADB_LTRIGGER + t);
+            if (on) down = b; else up = b;
+            trig[i][t] = on;
+        }
+    }
+    if (!host_test) note_press_in(&coop_unseen[i], &coop_tap[i], down, up);
+}
+
+// Forget held keys (the menu took focus); the gamepad's buttons too, and its sticks are read again (input_pad_poll):
+// the menu took its events, so what it held before the menu stayed held for the game
+static _Atomic bool pad_stale;
 void input_reset(void) {
+    pad_stale = true;
     press_unseen = 0, tap_buttons = 0;
+    for (int i = 0; i < COOP_PADS; i++) coop_unseen[i] = 0, coop_tap[i] = 0;
     rumble_clear();
     memset(keys_down, 0, sizeof keys_down);
     recompute_keyboard();
 }
 
-volatile int g_debug_frame_request;  // F9: dump the next frame's passes (build/pass_*.png) + draw log
+static void coop_drop_poll(void);
+void input_pad_poll(void) {
+    coop_drop_poll();
+    if (!atomic_exchange(&pad_stale, false)) return;
+    recompute_pad();
+    pad_buttons = 0;  // (a button still held from the menu - the B that closed it - isn't a press for the game)
+}
 
-// Events a test pushes (LARECOMP_HOST_INPUT type: / sdlkey: / sdlpad: / mouse:) carry this device id: they go the whole way, menu first.
+volatile int g_debug_frame_request;  // F9: dump the next frame's passes (build/pass_*.png) + draw log
+volatile int g_interp_ring_request;  // F10 or backslash (F10 can be a media key on a Mac): save frame interpolation's recent images (LARECOMP_INTERP_RING, metal.m)
+
+// Events a test pushes (LARECOMP_HOST_INPUT type: / sdlkey: / sdlpad: / sdlaxis: / mouse:) carry this device id: they go the whole way, menu first.
 #define TEST_DEVICE 0x7E57u
+// ... and "frame:vpad:<n>/<button>:frames" holds a button of test controller n (1..4): a virtual controller SDL lists
+// like any other (SDL_AttachVirtualJoystick, attached on its first use), its events coming the way a real one's do -
+// for the drop-in co-op tests (a controller's Plus joins, its Minus held leaves). Test controller 1 can be Player 1's;
+// the others never are (open_pad). Not blocked as the user's (input_user_blocked).
+#define TEST_PADS 4
+static SDL_JoystickID test_pad_id[TEST_PADS];
+static SDL_Joystick *test_pad_joy[TEST_PADS];
+static int test_pad_of(SDL_JoystickID id) {  // (its number, 1..; 0: not a test controller)
+    for (int n = 0; id && n < TEST_PADS; n++)
+        if (test_pad_id[n] == id) return n + 1;
+    return 0;
+}
 static bool test_event(const SDL_Event *e) {
+    switch (e->type) {
+    case SDL_EVENT_GAMEPAD_ADDED: return test_pad_of(e->gdevice.which) > 0;
+    case SDL_EVENT_JOYSTICK_ADDED: return test_pad_of(e->jdevice.which) > 0;
+    case SDL_EVENT_JOYSTICK_BUTTON_DOWN: case SDL_EVENT_JOYSTICK_BUTTON_UP: return test_pad_of(e->jbutton.which) > 0;
+    case SDL_EVENT_JOYSTICK_AXIS_MOTION: return test_pad_of(e->jaxis.which) > 0;
+    default: break;
+    }
+    if ((e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e->type == SDL_EVENT_GAMEPAD_BUTTON_UP) && test_pad_of(e->gbutton.which))
+        return true;
+    if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && test_pad_of(e->gaxis.which)) return true;
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: return e->key.which == TEST_DEVICE;
     case SDL_EVENT_TEXT_INPUT: return e->text.windowID == TEST_DEVICE;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: return e->gbutton.which == TEST_DEVICE;
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION: return e->gaxis.which == TEST_DEVICE;
     case SDL_EVENT_MOUSE_MOTION: return e->motion.which == TEST_DEVICE;
     case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP: return e->button.which == TEST_DEVICE;
     default: return false;
@@ -366,11 +580,10 @@ int input_pad_family(void) {
     return env >= 0 ? env : pad_family;
 }
 
-// Our menus' face buttons: the family whose button names they show, and (Confirm button = Controller convention, #172)
-// whose layout they use - Nintendo (0): the right button confirms, the bottom one goes back; Xbox / PlayStation
-// (1 / 2): the bottom one confirms, the right one goes back (runtime/ui/pad_nav.mm). "Button icons"
-// forced to a style wins (icons and menus agree); Auto: the controller `which` that pressed (0, or not a connected
-// gamepad - a test's pushed press: the game's controller / the first connected one, else Nintendo).
+// Our menus' button names: the family whose words the hints use (which button confirms is the Confirm button
+// setting's alone, runtime/ui/pad_nav.mm). "Button icons" forced to a style wins (hints and the game's icons agree);
+// Auto: the controller `which` that pressed (0, or not a connected gamepad - a test's pushed press: the game's
+// controller / the first connected one, else Nintendo).
 int input_menu_family(SDL_JoystickID which) {
     switch (g_settings.prompts) {
     case PROMPTS_NINTENDO: return 0;
@@ -400,31 +613,286 @@ static void use_pad(SDL_JoystickID id, const char *why) {
         rumble_last_lo = rumble_last_hi = 0, rumble_warned = false;  // (the next poll starts it on the new one)
     }
     pad = g;
-    LOG("[input] gamepad: %s%s\n", SDL_GetGamepadName(pad), why);
+    LOG("[input] gamepad: %s%s (%s)\n", SDL_GetGamepadName(pad), why,
+        SDL_GetGamepadPath(pad) ? SDL_GetGamepadPath(pad) : "no path");
     note_family();
     recompute_pad();
 }
+#ifdef __ANDROID__
+// Android lists other input devices as gamepads too (a wireless keyboard / mouse receiver's media keys: "Logitech USB
+// Receiver Mouse"), and the first one listed was taken: a DualSense connected beside it wasn't read until pressed. A
+// pad SDL knows (PlayStation, Xbox, Switch...) ranks over one with sticks and face buttons, which ranks over anything
+// else; the best one connected is read, and pressing another still switches to it. From Nycolazs's
+// LASRecomp-Android-Plus via mamcjr's LASRecompAndroid (both MIT).
+static int pad_rank(SDL_JoystickID id) {
+    SDL_GamepadType t = SDL_GetGamepadTypeForID(id);
+    if (t != SDL_GAMEPAD_TYPE_UNKNOWN && t != SDL_GAMEPAD_TYPE_STANDARD) return 3;
+    char *m = SDL_GetGamepadMappingForID(id);
+    int r = m && strstr(m, "leftx:") && strstr(m, ",a:") && strstr(m, ",b:") ? 2 : 1;
+    SDL_free(m);
+    return r;
+}
+#endif
 static void open_pad(SDL_JoystickID id) {
     if (!SDL_GetGamepadFromID(id)) SDL_OpenGamepad(id);
-    if (!pad) use_pad(id, "");
+    if (test_pad_of(id) > 1) return;  // (a test's other players' controllers: never Player 1's)
+    // (the first is Player 1's - or the one assigned to him, as it connects)
+    bool assigned = pad_saved_player(id) == 0 && (!pad || pad_saved_player(SDL_GetGamepadID(pad)) != 0);
+#ifdef __ANDROID__
+    int r = pad_rank(id);
+    LOG("[input] connected: %s (rank %d)\n", SDL_GetGamepadNameForID(id), r);
+    if (!pad || assigned || (r > pad_rank(SDL_GetGamepadID(pad)) && pad_saved_player(SDL_GetGamepadID(pad)) != 0))
+        use_pad(id, assigned || !pad ? "" : " (a better controller)");
+#else
+    if (!pad || assigned) use_pad(id, "");
+#endif
+}
+// (Player 1 has the controller assigned to him: a press on a spare one doesn't take it over - nor, with co-op on, in
+// play: there a spare one's press is for joining, coop_waiting)
+static bool pad_pinned(void) {
+    return pad && (pad_saved_player(SDL_GetGamepadID(pad)) == 0 || (coop_enabled() && game_in_play()));
 }
 
+// ---- Whose controller is whose (the Controls tab's "Player N controller", runtime/ui/controls_ui.mm). The row waits
+// for a button (input_assign_begin): the next press, on any controller, gives that controller to the player - taken
+// from whoever had it, who gets the player's own (a swap). Each player's is remembered by its device path (settings
+// coop_pad_path_N, saved): as they connect, one with a player's path goes to that player (open_pad, coop_pad_open). The
+// press is taken before the menus see it (input_assign_event, from the event loops), so it doesn't also act on them;
+// Escape, or 10 s, gives up. UI thread.
+static int assign_player = -1;
+static uint64_t assign_until;
+void input_assign_begin(int player) { assign_player = player, assign_until = SDL_GetTicks() + 10000; }
+int input_assign_waiting(void) {
+    if (assign_player >= 0 && SDL_GetTicks() > assign_until) assign_player = -1;
+    return assign_player;
+}
+static void slot_set(int k, SDL_Gamepad *g) {
+    if (coop_pad[k] && coop_pad[k] != g) SDL_RumbleGamepad(coop_pad[k], 0, 0, 0);
+    coop_pad[k] = g;
+    coop_rumble_last[k][0] = coop_rumble_last[k][1] = 0;
+    if (g) SDL_SetGamepadPlayerIndex(g, k + 1);
+    coop_recompute(k);
+}
+// Controller `id` remembered as player `player`'s (settings coop_pad_path_N; saved by the caller): no other player's.
+static void remember_pad(int player, SDL_JoystickID id) {
+    char buf[80];
+    const char *key = pad_key(id, buf, sizeof buf);
+    for (int p = 0; p < 8; p++)
+        if (p != player && !strcmp(g_settings.coop_pad_path[p], key)) g_settings.coop_pad_path[p][0] = 0;
+    snprintf(g_settings.coop_pad_path[player], sizeof g_settings.coop_pad_path[player], "%s", key);
+}
+static void assign_pad(int player, SDL_JoystickID id) {
+    SDL_Gamepad *g = SDL_GetGamepadFromID(id);
+    if (!g) g = SDL_OpenGamepad(id);
+    int from = coop_slot_of(id), k = player - 1;
+    if (!g || player >= 8 || (player ? from == k : g == pad)) return;
+    if (player > 0 && (k >= COOP_PADS || !(coop_joined() >> player & 1))) {  // (he isn't in: it joins as him - its Plus)
+        remember_pad(player, id);
+        LOG("[input] Player %d's controller (as he joins): %s\n", player + 1, SDL_GetGamepadName(g));
+        return;
+    }
+    if (!player) {
+        SDL_Gamepad *old = pad;
+        use_pad(id, " (assigned)");
+        if (from >= 0) slot_set(from, old);
+    } else {
+        SDL_Gamepad *cur = coop_pad[k];
+        if (from >= 0) slot_set(from, cur);
+        else if (g == pad && cur) use_pad(SDL_GetGamepadID(cur), " (Player 1's, swapped)");
+        else if (g == pad) {
+            SDL_RumbleGamepad(pad, 0, 0, 0);
+            led_restore("controller assigned");
+            pad = NULL;
+            recompute_pad();
+        }
+        slot_set(k, g);
+    }
+    LOG("[input] Player %d's controller: %s\n", player + 1, SDL_GetGamepadName(g));
+    for (int p = 0; p < 8; p++) {  // (the players with one now: theirs; the others keep the one they joined with)
+        SDL_Gamepad *h = p == 0 ? pad : p <= COOP_PADS ? coop_pad[p - 1] : NULL;
+        if (h) remember_pad(p, SDL_GetGamepadID(h));
+    }  // (saved by the menu, as the row stops waiting)
+}
+bool input_assign_event(const SDL_Event *e) {
+    if (input_assign_waiting() < 0) return false;
+    if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_ESCAPE) {
+        assign_player = -1;
+        return true;
+    }
+    if (e->type != SDL_EVENT_GAMEPAD_BUTTON_DOWN || e->gbutton.which == TEST_DEVICE) return false;
+    int player = assign_player;
+    assign_player = -1;
+    assign_pad(player, e->gbutton.which);
+    return true;
+}
+
+// ---- Drop-in co-op (co-op on: runtime/hle/coop.c coop_enabled). In play a controller that is neither Player 1's nor a
+// player's waits: its Plus held JOIN_HOLD_MS asks to join (coop_join_pad) - as the first free player, or the one it
+// played as before when he is free (pad_saved_player); the player is in once his Link is made (coop.c coop_join), and
+// his controller goes back to waiting once he is out (coop_drop_poll). A player's Minus held on its own asks to leave:
+// after LEAVE_WAIT_MS a ring fills over his Link for LEAVE_HOLD_MS (coop_leave_progress, runtime/ui/coop_hud.mm), then
+// he is out; Minus with L or R steps his tunic colour, and no leave comes of that hold - nor a ring, done within the
+// wait. (Players 2..8's Plus and Minus never reach the game: coop_fill.) UI thread. (Times: user 2026-11-15; the
+// leave's 0.33 s and 2 s: user 2026-11-17)
+#define JOIN_HOLD_MS 750
+#define LEAVE_WAIT_MS 330
+#define LEAVE_HOLD_MS 2000
+extern void coop_join_want(int player_index), coop_leave_want(int player_index);
+static _Atomic uint64_t minus_since[COOP_PADS];  // (Minus went down on that player's controller, SDL ms; 0: up)
+static _Atomic bool minus_spoiled[COOP_PADS];     // (another button with it this hold: no leave)
+static _Atomic bool minus_held[COOP_PADS];  // (for the game thread: his L and R don't reach the game meanwhile)
+static struct { SDL_JoystickID id; uint64_t since; } plus_hold[8];  // (waiting controllers' Plus held: since, SDL ms)
+
+static bool coop_waiting(SDL_JoystickID id) {
+    return coop_enabled() && game_in_play() && pad && SDL_GetGamepadID(pad) != id && coop_slot_of(id) < 0;
+}
+
+static void coop_join_pad(SDL_JoystickID id) {
+    uint32_t joined = coop_joined();
+    int k = pad_saved_player(id) - 1;
+    if (k < 0 || k >= COOP_PADS || coop_pad[k] || (joined >> (k + 1) & 1)) {  // (its own number taken: the first free)
+        k = -1;
+        for (int i = 0; i < COOP_PADS && k < 0; i++)
+            if (!coop_pad[i] && !(joined >> (i + 1) & 1)) k = i;
+    }
+    SDL_Gamepad *g = SDL_GetGamepadFromID(id);
+    if (!g) g = SDL_OpenGamepad(id);
+    if (k < 0 || !g) return;  // (eight players in, or no controller)
+    slot_set(k, g);
+    minus_since[k] = 0, minus_held[k] = false;
+    remember_pad(k + 1, id);
+    settings_save();
+    LOG("[input] Player %d joins: %s\n", k + 2, SDL_GetGamepadName(g));
+    coop_join_want(k + 1);
+}
+
+// A waiting controller's Plus (Start) going down or up: its hold starts, or ends short of a join.
+static void coop_wait_press(SDL_JoystickID id, const SDL_Event *e) {
+    if ((e->type != SDL_EVENT_GAMEPAD_BUTTON_DOWN && e->type != SDL_EVENT_GAMEPAD_BUTTON_UP) ||
+        e->gbutton.button != SDL_GAMEPAD_BUTTON_START)
+        return;
+    int free = -1;
+    for (int i = 0; i < 8; i++) {
+        if (plus_hold[i].id == id) plus_hold[i].id = 0;
+        if (!plus_hold[i].id && free < 0) free = i;
+    }
+    if (e->gbutton.down && free >= 0) plus_hold[free].id = id, plus_hold[free].since = SDL_GetTicks();
+}
+
+// A player's press with Minus down: L / R step his colour (runtime/hle/coop.c tunic colours: COOP_COLOURS of them),
+// anything else spoils the leave. Minus itself starts the hold.
+static void coop_drop_press(int k, const SDL_Event *e) {
+    if (!coop_enabled() || (e->type != SDL_EVENT_GAMEPAD_BUTTON_DOWN && e->type != SDL_EVENT_GAMEPAD_BUTTON_UP)) return;
+    int b = e->gbutton.button;
+    if (b == SDL_GAMEPAD_BUTTON_BACK) {
+        minus_since[k] = e->gbutton.down ? SDL_GetTicks() | 1 : 0;
+        minus_spoiled[k] = false, minus_held[k] = e->gbutton.down;
+        return;
+    }
+    if (!e->gbutton.down || !minus_since[k]) return;
+    minus_spoiled[k] = true;
+    if (b == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER || b == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER) {
+        int *col = &g_settings.coop_colour[k + 1];
+        *col = (*col + (b == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER ? 1 : COOP_COLOURS - 1)) % COOP_COLOURS;
+        LOG("[input] Player %d's colour: %d\n", k + 2, *col);
+        settings_save();
+    }
+}
+
+// Each frame (input_pad_poll): a Minus held long enough asks to leave; a controller whose player is out waits again.
+static void coop_drop_poll(void) {
+    uint64_t now = SDL_GetTicks();
+    for (int i = 0; i < 8; i++) {  // (a waiting controller's Plus held long enough: it joins)
+        SDL_JoystickID id = plus_hold[i].id;
+        if (!id) continue;
+        if (!coop_waiting(id)) plus_hold[i].id = 0;  // (play ended, Player 1 took it, gone...)
+        else if (now - plus_hold[i].since >= JOIN_HOLD_MS) plus_hold[i].id = 0, coop_join_pad(id);
+    }
+    // (read after the joins just asked; the asks before who is in: the game thread lets an ask go only once he is in,
+    // so a join done between the two reads still shows as one or the other)
+    extern uint32_t coop_join_pending(void);
+    uint32_t pending = coop_join_pending();
+    uint32_t joined = coop_joined();
+    for (int k = 0; k < COOP_PADS; k++) {
+        bool in = joined >> (k + 1) & 1, asked = pending >> (k + 1) & 1;
+        if (coop_pad[k] && !in && !asked) {  // (left, a join that came to nothing, co-op off: the controller waits)
+            LOG("[input] Player %d's controller waits again\n", k + 2);
+            slot_set(k, NULL);
+            minus_since[k] = 0, minus_held[k] = false;
+            continue;
+        }
+        if (!in || !minus_since[k] || minus_spoiled[k]) continue;
+        if (now - minus_since[k] >= LEAVE_WAIT_MS + LEAVE_HOLD_MS) {
+            minus_since[k] = 0, minus_held[k] = false;
+            LOG("[input] Player %d leaves\n", k + 2);
+            coop_leave_want(k + 1);
+        }
+    }
+}
+
+// Player n's leave hold so far (0..1; runtime/ui/coop_hud.mm draws it), worked out from when his Minus went down as
+// it is drawn: a value kept by coop_drop_poll moved only as often as that ran, and the ring filled in steps (user
+// 2026-11-15: "loads in chunks"). Render thread.
+float coop_leave_progress(int player) {
+    if (player < 2 || player > COOP_PADS + 1) return 0;
+    uint64_t since = minus_since[player - 2], now = SDL_GetTicks();
+    if (!since || minus_spoiled[player - 2] || !(coop_joined() >> (player - 1) & 1) || now < since + LEAVE_WAIT_MS)
+        return 0;
+    float f = (float)(now - since - LEAVE_WAIT_MS) / LEAVE_HOLD_MS;
+    return f > 1 ? 1 : f;
+}
+
+bool input_gamepad_connected(void) { return pad != NULL; }
+
+// touch screens: the on-screen controls (runtime/ui/mobile/touch_controls.mm)
+#if PLAT_TOUCH
+bool touch_handle_event(const SDL_Event *e);
+uint64_t touch_buttons(void);
+void touch_stick(int32_t *lx, int32_t *ly);
+void touch_pad_used(void);
+#else
+static bool touch_handle_event(const SDL_Event *e) { (void)e; return false; }
+static uint64_t touch_buttons(void) { return 0; }
+static void touch_stick(int32_t *lx, int32_t *ly) { *lx = *ly = 0; }
+static void touch_pad_used(void) {}
+#endif
+
 void input_handle_event(const SDL_Event *e) {
-    static bool scanned;  // pads present at startup: their ADDED event may have gone to the start screen's loop
-    if (!scanned) {
-        scanned = true;
+    // (pads present at startup: their ADDED event may have gone to the start screen's loop - pads_scanned)
+    if (!pads_scanned) {
+        pads_scanned = true;
         int n = 0;
         SDL_JoystickID *ids = SDL_GetGamepads(&n);
         for (int i = 0; ids && i < n; i++) open_pad(ids[i]);
         SDL_free(ids);
     }
+    if (touch_handle_event(e)) return;
+    // Local co-op: another player's controller is his alone (not Player 1's pad, not the menus' taps). With co-op on, in
+    // play, a controller that is neither waits: its Plus joins, nothing else of it reaches the game (coop_join_pad).
+    SDL_JoystickID which = e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e->type == SDL_EVENT_GAMEPAD_BUTTON_UP ? e->gbutton.which
+                           : e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION ? e->gaxis.which : 0;
+    if (which && which != TEST_DEVICE) {
+        int slot = coop_slot_of(which);
+        if (slot >= 0) {
+            coop_drop_press(slot, e);
+            coop_event_press(slot, e);
+            coop_recompute(slot);
+            return;
+        }
+        if (coop_waiting(which)) {
+            coop_wait_press(which, e);
+            return;
+        }
+    }
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
         if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) g_debug_frame_request = 1;
-        if (e->key.scancode == SDL_SCANCODE_F6 || e->key.scancode == SDL_SCANCODE_F7 || e->key.scancode == SDL_SCANCODE_F8) {  // V12: F6 PvP toggle, F7 dive assist, V14: F8 PvP lock-on
-            extern void laonline_v12_key(int, int, int);
-            laonline_v12_key(e->key.scancode == SDL_SCANCODE_F6 ? 6 : e->key.scancode == SDL_SCANCODE_F7 ? 7 : 8, e->type == SDL_EVENT_KEY_DOWN, e->key.repeat);
+        extern bool laonline_configured(void);
+        if (e->key.scancode >= SDL_SCANCODE_F6 && e->key.scancode <= SDL_SCANCODE_F8 && laonline_configured()) {
+            extern void laonline_v12_key(int, int, int);  // online play: F6 PvP on / off, F7 the dive assist, F8 lock-on
+            laonline_v12_key(6 + (e->key.scancode - SDL_SCANCODE_F6), e->type == SDL_EVENT_KEY_DOWN, e->key.repeat);
         }
+        if (e->type == SDL_EVENT_KEY_DOWN && (e->key.scancode == SDL_SCANCODE_F10 || e->key.scancode == SDL_SCANCODE_BACKSLASH) && !e->key.repeat) g_interp_ring_request = 1;
         if (e->key.scancode < SDL_SCANCODE_COUNT) keys_down[e->key.scancode] = e->type == SDL_EVENT_KEY_DOWN;
         uint64_t before = key_buttons;
         recompute_keyboard();
@@ -433,9 +901,12 @@ void input_handle_event(const SDL_Event *e) {
         break;
     }
     case SDL_EVENT_GAMEPAD_ADDED:
-        open_pad(e->gdevice.which);
+        if (coop_slot_of(e->gdevice.which) < 0) open_pad(e->gdevice.which);  // (local co-op: not another player's)
+        if (pad && SDL_GetGamepadID(pad) == e->gdevice.which) touch_pad_used();  // (the touch controls hide)
+        coop_pad_open(e->gdevice.which);
         break;
     case SDL_EVENT_GAMEPAD_REMOVED: {
+        coop_pad_close(e->gdevice.which);
         SDL_Gamepad *g = SDL_GetGamepadFromID(e->gdevice.which);
         if (g && g == pad) {
             SDL_RumbleGamepad(pad, 0, 0, 0);
@@ -447,8 +918,12 @@ void input_handle_event(const SDL_Event *e) {
         if (!pad) {  // another one still connected takes over
             int n = 0;
             SDL_JoystickID *ids = SDL_GetGamepads(&n);
+#ifdef __ANDROID__
+            for (int i = 0; ids && i < n; i++)  // (the best one still connected)
+#else
             for (int i = 0; ids && i < n && !pad; i++)
-                if (ids[i] != e->gdevice.which) open_pad(ids[i]);
+#endif
+                if (ids[i] != e->gdevice.which && coop_slot_of(ids[i]) < 0) open_pad(ids[i]);
             SDL_free(ids);
             note_family();
         }
@@ -456,8 +931,10 @@ void input_handle_event(const SDL_Event *e) {
         break;
     }
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
-        if (e->gbutton.down && e->gbutton.which != TEST_DEVICE && !host_test) use_pad(e->gbutton.which, " (switched)");
+        if (e->gbutton.down && e->gbutton.which != TEST_DEVICE && !host_test && !pad_pinned())
+            use_pad(e->gbutton.which, " (switched)");
         if (pad && e->gbutton.which != TEST_DEVICE && e->gbutton.which != SDL_GetGamepadID(pad)) break;  // (another pad)
+        if (e->gbutton.down && !host_test) touch_pad_used();  // (the touch controls hide)
         if (!host_test || e->gbutton.which == TEST_DEVICE) {  // (the press as the event has it, before reading the pad)
             uint64_t b = pad_bits(e->gbutton.button);
             note_press(e->gbutton.down ? b : 0, e->gbutton.down ? 0 : b);
@@ -465,7 +942,12 @@ void input_handle_event(const SDL_Event *e) {
         recompute_pad();
         break;
     case SDL_EVENT_GAMEPAD_AXIS_MOTION:
-        if (!host_test && abs(e->gaxis.value) > 24000 && pad_at_rest()) use_pad(e->gaxis.which, " (switched)");
+        if (!host_test && abs(e->gaxis.value) > 24000 && pad_at_rest() && !pad_pinned()
+#ifdef __ANDROID__
+            && (!pad || pad_rank(e->gaxis.which) >= pad_rank(SDL_GetGamepadID(pad)))  // (not to a lesser device's axis)
+#endif
+            )
+            use_pad(e->gaxis.which, " (switched)");
         if (pad && e->gaxis.which != SDL_GetGamepadID(pad)) break;  // (another pad's stick: not the game's)
         if ((e->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || e->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) &&
             !host_test) {  // (the triggers as buttons: past half way)
@@ -479,6 +961,8 @@ void input_handle_event(const SDL_Event *e) {
             }
         }
         recompute_pad();
+        // the controller in use (a stick or trigger well off centre - not drift; a press: above): the touch controls hide
+        if (abs(e->gaxis.value) > 12000) touch_pad_used();
         break;
     }
 }
@@ -497,12 +981,16 @@ static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 //   entry first like a player's typing; "{Escape}" (any SDL key name) presses that key. No ',' or ':' in <text>.
 // "frame:sdlpad:<button>:frames" / "frame:sdlkey:<key>:frames" hold a controller button / key as real events (down
 //   at frame, up `frames` later): they reach menus and the on-screen keyboard first, as a player's would.
-// "frame:mouse:<dx>/<dy>" moves the mouse by that many points, "frame:mouse:click" clicks it (real events).
+// "frame:sdlaxis:<axis>=<value>:frames" holds a controller axis (SDL name: righty, leftx...; raw units, -32768..32767,
+//   y down) as real events, back to 0 `frames` later.
+// "frame:mouse:<dx>/<dy>" moves the mouse by that many points, "frame:mouse:@<x>/<y>" to that point of the window
+//   (clicks then go there, not to the real mouse), "frame:mouse:click" clicks it (real events).
 // "frame:shot:<name>" saves the window (game + menus) to build/<name>.png.
 // "frame:resize:<W>x<H>" resizes the window to W x H points (menu_apply_window_requests: the main thread).
 // LARECOMP_BIND_TEST="frame:pad|key:<input>:<host>,..." starts a rebind capture of <input> (bind_* name: a, zl,
 //   ls_up...) at that frame (the Controls tab shows it waiting) and presses <host> 90 frames later ("esc" cancels,
-//   "wait" lets it time out); "frame:reset:pad|key" resets to the defaults.
+//   "wait" lets it time out); "frame:reset:pad|key" resets to the defaults. The menu's shortcuts (menu1, menu2) take
+//   "back+start" (both down, then up) and "clear" (clears it instead of a capture).
 static void push_key(SDL_Scancode sc, SDL_Keymod mod, bool down) {
     SDL_Event e;
     memset(&e, 0, sizeof e);
@@ -512,6 +1000,7 @@ static void push_key(SDL_Scancode sc, SDL_Keymod mod, bool down) {
     SDL_PushEvent(&e);
 }
 uint32_t g_window_resize_request;  // (W << 16 | H: menu_apply_window_requests applies it)
+uint64_t g_window_move_request;    // ((x + 32768) << 16 | (y + 32768), bit 63 set: a move to x,y - another display in tests)
 static void test_push(uint64_t frame, unsigned long start, unsigned long len, const char *dev, const char *arg) {
     SDL_Event e;
     memset(&e, 0, sizeof e);
@@ -523,6 +1012,14 @@ static void test_push(uint64_t frame, unsigned long start, unsigned long len, co
         }
         return;
     }
+    if (!strcmp(dev, "move")) {
+        int x = 0, y = 0;
+        if (frame == start && sscanf(arg, "%d/%d", &x, &y) == 2 && abs(x) < 32768 && abs(y) < 32768) {
+            LOG("[input] test: window moved to %d,%d\n", x, y);
+            __atomic_store_n(&g_window_move_request, 1ull << 63 | (uint64_t)(unsigned)(x + 32768) << 16 | (unsigned)(y + 32768), __ATOMIC_RELAXED);
+        }
+        return;
+    }
     if (!strcmp(dev, "shot")) {
         extern char g_window_shot_request[256];  // runtime/hle/hookshot.c
         if (frame == start) snprintf(g_window_shot_request, sizeof g_window_shot_request, "build/%s.png", arg);
@@ -531,8 +1028,14 @@ static void test_push(uint64_t frame, unsigned long start, unsigned long len, co
     if (!strcmp(dev, "mouse")) {
         if (frame != start) return;
         float mx, my, dx = 0, dy = 0;
+        static float at_x = -1, at_y;  // (the last "@x/y": clicks go there, wherever the real mouse is)
         SDL_GetMouseState(&mx, &my);
-        if (!strcmp(arg, "click")) {
+        if (at_x >= 0) mx = at_x, my = at_y;
+        if (arg[0] == '@') {
+            sscanf(arg + 1, "%f/%f", &at_x, &at_y);
+            e.type = SDL_EVENT_MOUSE_MOTION;
+            e.motion.which = TEST_DEVICE, e.motion.x = at_x, e.motion.y = at_y, e.motion.xrel = at_x - mx, e.motion.yrel = at_y - my;
+        } else if (!strcmp(arg, "click")) {
             e.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
             e.button.which = TEST_DEVICE, e.button.button = SDL_BUTTON_LEFT, e.button.down = true, e.button.clicks = 1;
             e.button.x = mx, e.button.y = my;
@@ -540,6 +1043,7 @@ static void test_push(uint64_t frame, unsigned long start, unsigned long len, co
             e.type = SDL_EVENT_MOUSE_BUTTON_UP, e.button.down = false;
         } else {
             sscanf(arg, "%f/%f", &dx, &dy);
+            if (at_x >= 0) at_x += dx, at_y += dy;
             e.type = SDL_EVENT_MOUSE_MOTION;
             e.motion.which = TEST_DEVICE, e.motion.x = mx + dx, e.motion.y = my + dy, e.motion.xrel = dx, e.motion.yrel = dy;
         }
@@ -548,6 +1052,40 @@ static void test_push(uint64_t frame, unsigned long start, unsigned long len, co
     }
     if (!strcmp(dev, "sdlkey")) {
         if (frame == start || frame == start + len) push_key(SDL_GetScancodeFromName(arg), SDL_KMOD_NONE, frame == start);
+        return;
+    }
+    if (!strcmp(dev, "sdlaxis")) {  // <axis>=<value>, e.g. righty=24000: held for len frames, then back to 0
+        char an[32] = "";
+        int v = 0;
+        if ((frame != start && frame != start + len) || sscanf(arg, "%31[a-z]=%d", an, &v) != 2) return;
+        SDL_GamepadAxis ax = SDL_GetGamepadAxisFromString(an);
+        if (ax == SDL_GAMEPAD_AXIS_INVALID) return;
+        e.type = SDL_EVENT_GAMEPAD_AXIS_MOTION;
+        e.gaxis.which = TEST_DEVICE, e.gaxis.axis = (Uint8)ax, e.gaxis.value = (Sint16)(frame == start ? v : 0);
+        SDL_PushEvent(&e);
+        return;
+    }
+    if (!strcmp(dev, "vpad")) {  // <n>/<button>: test controller n's button (SDL name: start, back, leftshoulder...)
+        int n = 0;
+        char bn[32] = "";
+        if ((frame != start && frame != start + len) || sscanf(arg, "%d/%31s", &n, bn) != 2 || n < 1 || n > TEST_PADS)
+            return;
+        SDL_GamepadButton b = SDL_GetGamepadButtonFromString(bn);
+        if (b == SDL_GAMEPAD_BUTTON_INVALID) return;
+        if (!test_pad_joy[n - 1]) {
+            static char names[TEST_PADS][32];
+            snprintf(names[n - 1], sizeof names[n - 1], "LAS Recomp test controller %d", n);
+            SDL_VirtualJoystickDesc d;
+            SDL_INIT_INTERFACE(&d);
+            d.type = SDL_JOYSTICK_TYPE_GAMEPAD, d.naxes = SDL_GAMEPAD_AXIS_COUNT, d.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+            d.name = names[n - 1];
+            SDL_JoystickID id = SDL_AttachVirtualJoystick(&d);
+            test_pad_id[n - 1] = id;
+            test_pad_joy[n - 1] = id ? SDL_OpenJoystick(id) : NULL;
+            LOG("[input] test controller %d: %s\n", n, test_pad_joy[n - 1] ? "attached" : SDL_GetError());
+            if (!test_pad_joy[n - 1]) return;
+        }
+        SDL_SetJoystickVirtualButton(test_pad_joy[n - 1], (int)b, frame == start);
         return;
     }
     if (!strcmp(dev, "sdlpad")) {
@@ -604,8 +1142,8 @@ static void host_test_frame(uint64_t frame) {
             unsigned long start = 0, len = 10;
             char dev[8] = "", name[400] = "";
             if (sscanf(tok, "%lu:%7[a-z]:%399[^:]:%lu", &start, dev, name, &len) < 3) continue;
-            if (!strcmp(dev, "type") || !strcmp(dev, "sdlpad") || !strcmp(dev, "sdlkey") || !strcmp(dev, "shot") ||
-                !strcmp(dev, "resize") || !strcmp(dev, "mouse")) {
+            if (!strcmp(dev, "type") || !strcmp(dev, "sdlpad") || !strcmp(dev, "vpad") || !strcmp(dev, "sdlaxis") || !strcmp(dev, "sdlkey") || !strcmp(dev, "shot") ||
+                !strcmp(dev, "resize") || !strcmp(dev, "move") || !strcmp(dev, "mouse")) {
                 test_push(frame, start, len, dev, name);
                 continue;
             }
@@ -627,9 +1165,13 @@ static void host_test_frame(uint64_t frame) {
         for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
             unsigned long start = 0;
             char dev[8] = "", in[16] = "", host[40] = "";
-            if (sscanf(tok, "%lu:%7[a-z]:%15[a-z_]:%39[^:]", &start, dev, in, host) < 3) continue;
+            if (sscanf(tok, "%lu:%7[a-z]:%15[a-z_0-9]:%39[^:]", &start, dev, in, host) < 3) continue;
             if (!strcmp(dev, "reset")) { if (frame == start) bind_reset(!strcmp(in, "key") ? BIND_DEV_KEY : BIND_DEV_PAD); continue; }
-            int d = !strcmp(dev, "key") ? BIND_DEV_KEY : BIND_DEV_PAD;
+            int d = !strcmp(dev, "key") ? BIND_DEV_KEY : BIND_DEV_PAD, slot = bind_slot_from_name(in);
+            if (!strcmp(host, "clear")) {
+                if (frame == start && slot >= BIND_MENU_1) LOG("[input] test: clear %s -> %d\n", in, bind_menu_clear(slot - BIND_MENU_1));
+                continue;
+            }
             if (frame == start) {
                 LOG("[input] test: capture %s %s\n", dev, in);
                 bind_capture_begin(d, bind_slot_from_name(in));
@@ -651,9 +1193,70 @@ static void host_test_frame(uint64_t frame) {
                         e.gbutton.button = (Uint8)h;
                     }
                 }
+                const char *plus = strchr(host, '+');
+                int h2 = plus ? bind_pad_from_name(plus + 1) : -1;
+                if (plus) *(char *)plus = 0, e.gbutton.button = (Uint8)bind_pad_from_name(host);
                 bind_capture_event(&e);
+                if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {  // (a menu shortcut takes a pair, or a button let go)
+                    int h1 = e.gbutton.button;
+                    if (h2 >= 0) e.gbutton.button = (Uint8)h2, bind_capture_event(&e);
+                    e.type = SDL_EVENT_GAMEPAD_BUTTON_UP, e.gbutton.button = (Uint8)h1, bind_capture_event(&e);
+                    if (h2 >= 0) e.gbutton.button = (Uint8)h2, bind_capture_event(&e);
+                }
             }
         }
+    }
+}
+
+// A LARECOMP_INPUT script (below) at a frame: the buttons it holds, its sticks (lx, ly, rx, ry). buf: a copy to cut up.
+static void script_at(const char *spec, uint64_t frame, char *buf, size_t cap, uint64_t *b, int32_t st[4]) {
+    static const char *const names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
+                                        "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
+    *b = 0;
+    for (int a = 0; a < 4; a++) st[a] = 0;
+    snprintf(buf, cap, "%s", spec);
+    char *save = NULL;
+    for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+        unsigned long start = 0, len = 10;
+        char name[32] = "";
+        if (sscanf(tok, "%lu:%31[A-Z_0-9]:%lu", &start, name, &len) < 2) continue;
+        if (frame < start || frame >= start + len) continue;
+        if (!strcmp(name, "STICK_UP")) st[1] = 32767;
+        else if (!strcmp(name, "STICK_DOWN")) st[1] = -32767;
+        else if (!strcmp(name, "STICK_LEFT")) st[0] = -32767;
+        else if (!strcmp(name, "STICK_RIGHT")) st[0] = 32767;
+        else if (!strcmp(name, "RSTICK_UP")) st[3] = 32767;
+        else if (!strcmp(name, "RSTICK_DOWN")) st[3] = -32767;
+        else if (!strcmp(name, "RSTICK_LEFT")) st[2] = -32767;
+        else if (!strcmp(name, "RSTICK_RIGHT")) st[2] = 32767;
+        else if (!strncmp(name, "STICK_", 6) && name[6] >= '0' && name[6] <= '9') {
+            double r = atoi(name + 6) * 3.14159265358979 / 180;
+            st[0] = (int32_t)lround(cos(r) * 32767), st[1] = (int32_t)lround(sin(r) * 32767);
+        }
+        for (int k = 0; k < 16; k++) if (!strcmp(name, names[k])) *b |= 1ull << k;
+    }
+}
+
+// LARECOMP_INPUT_P2 .. _P8 (tests): LARECOMP_INPUT's script (below) for local co-op player 2..8.
+static void coop_script_frame(uint64_t frame) {
+    static const char *spec[COOP_PADS];
+    static bool read, any;
+    if (!read) {  // (the environment, once: this runs every frame)
+        read = true;
+        for (int i = 0; i < COOP_PADS; i++) {
+            char var[24];
+            snprintf(var, sizeof var, "LARECOMP_INPUT_P%d", i + 2);
+            any |= (spec[i] = getenv(var)) != NULL;
+        }
+    }
+    for (int i = 0; any && i < COOP_PADS; i++) {
+        if (!spec[i]) continue;
+        uint64_t b;
+        int32_t st[4];
+        static char buf[8192];
+        script_at(spec[i], frame, buf, sizeof buf, &b, st);
+        coop_script_btn[i] = b;
+        for (int a = 0; a < 4; a++) coop_script_axis[i][a] = st[a];
     }
 }
 
@@ -678,33 +1281,14 @@ void input_frame(uint64_t frame) {
     extern void watch_arm(void);
     watch_arm();
     host_test_frame(frame);
+    coop_script_frame(frame);
     const char *spec = getenv("LARECOMP_INPUT");
     if (!spec) return;
-    static const char *const names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
-                                        "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
-    uint64_t b = 0;
-    int32_t lx = 0, ly = 0, rx = 0, ry = 0;
+    uint64_t b;
+    int32_t st[4];
     static char buf[16384];  // (long scripted sessions: the perf walk is ~4 KB)
-    snprintf(buf, sizeof buf, "%s", spec);
-    for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
-        unsigned long start = 0, len = 10;
-        char name[32] = "";
-        if (sscanf(tok, "%lu:%31[A-Z_0-9]:%lu", &start, name, &len) < 2) continue;
-        if (frame < start || frame >= start + len) continue;
-        if (!strcmp(name, "STICK_UP")) ly = 32767;
-        else if (!strcmp(name, "STICK_DOWN")) ly = -32767;
-        else if (!strcmp(name, "STICK_LEFT")) lx = -32767;
-        else if (!strcmp(name, "STICK_RIGHT")) lx = 32767;
-        else if (!strcmp(name, "RSTICK_UP")) ry = 32767;
-        else if (!strcmp(name, "RSTICK_DOWN")) ry = -32767;
-        else if (!strcmp(name, "RSTICK_LEFT")) rx = -32767;
-        else if (!strcmp(name, "RSTICK_RIGHT")) rx = 32767;
-        else if (!strncmp(name, "STICK_", 6) && name[6] >= '0' && name[6] <= '9') {
-            double r = atoi(name + 6) * 3.14159265358979 / 180;
-            lx = (int32_t)lround(cos(r) * 32767), ly = (int32_t)lround(sin(r) * 32767);
-        }
-        for (int i = 0; i < 16; i++) if (!strcmp(name, names[i])) b |= 1ull << i;
-    }
+    script_at(spec, frame, buf, sizeof buf, &b, st);
+    int32_t lx = st[0], ly = st[1], rx = st[2], ry = st[3];
     {  // test hooks steering the stick (runtime/hle/doorjump.c LARECOMP_DOORJUMP_TEST)
         extern int32_t g_test_lx, g_test_ly;
         extern uint64_t g_test_stick_until;
@@ -718,13 +1302,72 @@ void input_frame(uint64_t frame) {
     script_rx = rx;
     script_ry = ry;
 }
+// (touch_controls.mm, LARECOMP_TOUCH_SHOW_INPUT: the scripted presses drawn on the on-screen controls)
+void input_script_state(uint64_t *buttons, int32_t *lx, int32_t *ly) { *buttons = script_buttons, *lx = script_lx, *ly = script_ly; }
 
 extern bool menu_input_captured(void);  // runtime/ui/menu.mm: overlay menu or name entry up (it has the keys / pad)
 
 // Buttons held right now (keyboard, gamepad, test script), independent of whether the game polls (movies).
-uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_buttons | pad_buttons) | script_buttons; }
+uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_buttons | pad_buttons | touch_buttons()) | script_buttons; }
 
 static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -32767 : v; }
+
+// Local co-op: player i+2's npad state (his controller through the bindings, a test script: LARECOMP_INPUT_P<n>).
+// Mirror mode and d-pad walking as for Player 1; the overlay menu takes every controller while it is open.
+static void coop_fill(uint8_t *s, int i) {
+    // (knocked out, or Player 1 in a cutscene: no input, scripted too - runtime/hle/coop.c)
+    extern int coop_input_blocked(int player);
+    extern uint64_t renderer_present_count(void);
+    bool off = coop_input_blocked(i + 1), menu = menu_input_captured() || off;
+    // (a press released before this poll saw it - a quick tap: as for Player 1, note_press)
+    uint64_t held = coop_btn[i];
+    atomic_fetch_and(&coop_unseen[i], ~held);  // (the game sees these now)
+    static uint64_t tap[COOP_PADS], tap_frame[COOP_PADS];  // (held for the rest of the frame: it polls more than once)
+    uint64_t t = atomic_exchange(&coop_tap[i], 0), f = renderer_present_count();
+    if (t) tap[i] |= t, tap_frame[i] = f;
+    else if (f > tap_frame[i]) tap[i] = 0;
+    // (+ and -, the pause menu and the map, are Player 1's: the menu and a save take their spot from his - the hold,
+    // runtime/hle/coop.c hold_on_p1 - and no other player's)
+    uint64_t own = ~((1ull << BTN_PLUS) | (1ull << BTN_MINUS));
+    if (minus_held[i])  // (his Minus down: L and R step his colour - coop_drop_press - not the game's)
+        own &= ~(pad_bits(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER) | pad_bits(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER));
+    uint64_t b = ((menu ? 0 : held | tap[i]) | (off ? 0 : coop_script_btn[i])) & own;
+    int32_t lx = clamp_axis((menu ? 0 : coop_axis[i][0]) + (off ? 0 : coop_script_axis[i][0]));
+    int32_t ly = clamp_axis((menu ? 0 : coop_axis[i][1]) + (off ? 0 : coop_script_axis[i][1]));
+    int32_t rx = clamp_axis((menu ? 0 : coop_axis[i][2]) + (off ? 0 : coop_script_axis[i][2]));
+    int32_t ry = clamp_axis((menu ? 0 : coop_axis[i][3]) + (off ? 0 : coop_script_axis[i][3]));
+    extern bool mirror_input(void);
+    bool mirrored = !menu && mirror_input();
+    if (mirrored) {
+        lx = -lx;
+        uint64_t l = (b >> BTN_LEFT) & 1, r = (b >> BTN_RIGHT) & 1;
+        b = (b & ~((1ull << BTN_LEFT) | (1ull << BTN_RIGHT))) | (l << BTN_RIGHT) | (r << BTN_LEFT);
+    }
+    if (!menu && g_settings.dpad_mode == DPAD_MOVE && (int64_t)lx * lx + (int64_t)ly * ly < 8000ll * 8000) {
+        int dx = (int)((b >> BTN_RIGHT) & 1) - (int)((b >> BTN_LEFT) & 1);
+        int dy = (int)((b >> BTN_UP) & 1) - (int)((b >> BTN_DOWN) & 1);
+        int32_t m = dx && dy ? 23170 : 32767;
+        if (dx || dy) lx = dx * m, ly = dy * m;
+    }
+    extern int coop_reviving(int player), coop_revive_reach(int player);  // (holding A beside a knocked-out player: he
+    if (coop_reviving(i + 1)) lx = ly = 0, b &= ~(0xfull << 12);                // stands still, and his A is the revive's)
+    if (coop_revive_reach(i + 1)) b &= ~(1ull << BTN_A);
+    if (lx < -16000) b |= 1ull << 16;
+    if (ly > 16000) b |= 1ull << 17;
+    if (lx > 16000) b |= 1ull << 18;
+    if (ly < -16000) b |= 1ull << 19;
+    if (rx < -16000) b |= 1ull << 20;
+    if (ry > 16000) b |= 1ull << 21;
+    if (rx > 16000) b |= 1ull << 22;
+    if (ry < -16000) b |= 1ull << 23;
+    coop_seen[i] = b;
+    *(uint64_t *)(s + 8) = b;
+    *(int32_t *)(s + 16) = lx;
+    *(int32_t *)(s + 20) = ly;
+    *(int32_t *)(s + 24) = rx;
+    *(int32_t *)(s + 28) = ry;
+    *(uint32_t *)(s + 32) = 1;  // IsConnected (a player without a controller stands still)
+}
 
 // NpadFullKeyState / NpadHandheldState / NpadJoy*State share this layout (0x28 bytes):
 // {int64 sampling, u64 buttons, AnalogStick L {x,y}, AnalogStick R {x,y}, u32 attributes}
@@ -735,6 +1378,12 @@ static void fill_state(Cpu *c) {
     *(int64_t *)s = ++sampling;
     static int nlog;
     if (nlog < 6 && (sampling % 600) == 1) { nlog++; LOG("[input] GetNpadState id %#x lr %llx\n", id, c->x[30]); }
+    if (id >= 1 && id < 8) {  // local co-op: npad 2..8 are players 2..8 (their own controller, or none: standing)
+        extern int rt_coop_players(void);
+        extern uint32_t coop_joined(void);
+        if (rt_coop_players() > 1 && (coop_joined() >> id & 1)) coop_fill(s, (int)id - 1);
+        return;
+    }
     if (id != 0) return;  // docked: only player 1 (FullKey); Handheld stays disconnected
     extern void warp_game_tick(Cpu *c);
     warp_game_tick(c);  // game main thread, once per frame: apply a queued warp
@@ -748,12 +1397,16 @@ static void fill_state(Cpu *c) {
       pot_bush_game_tick(c, renderer_present_count());
       extern void shell_spots_tick(Cpu *c, uint64_t frame);
       shell_spots_tick(c, renderer_present_count());
+      extern void apple_trees_tick(Cpu *c, uint64_t frame);
+      apple_trees_tick(c, renderer_present_count());
       extern void qol_tick(void);
       qol_tick();
       extern void run_timer_tick(void);
       run_timer_tick();  // (run timer / LiveSplit: runtime/hle/run_timer.c)
       extern void pets_game_tick(Cpu *c);
-      pets_game_tick(c); }
+      pets_game_tick(c);
+      extern void coop_tick(Cpu *c);
+      coop_tick(c); }  // (local co-op: runtime/hle/coop.c)
     extern uint64_t g_watch_lo, g_watch_hi;
     if (id == 0 && !g_pad_obj) g_pad_obj = c->x[1] - 8;
     if (id == 0 && !g_watch_lo && getenv("LARECOMP_WATCH_PAD")) {
@@ -764,7 +1417,7 @@ static void fill_state(Cpu *c) {
         LOG("[input] watching controller object %llx\n", c->x[1] - 8);
     }
     bool menu = menu_input_captured();  // the overlay menu / name entry has the controls (typing there isn't for the game)
-    uint64_t held = key_buttons | pad_buttons;
+    uint64_t held = key_buttons | pad_buttons | touch_buttons();
     atomic_fetch_and(&press_unseen, ~held);  // (the game sees these now)
     static uint64_t tap, tap_frame;  // (pressed and released since the last poll: held for the rest of this frame)
     {
@@ -782,14 +1435,42 @@ static void fill_state(Cpu *c) {
         if (g_inject_plus > 0) { until = renderer_present_count() + 10; g_inject_plus = 0; }
         if (renderer_present_count() < until) b |= 1ull << BTN_PLUS;
     }
-    dpad_shortcuts_install();
-    b=dpad_shortcuts_input(b,menu);
-    { extern uint64_t laonline_v12_input(uint64_t, int); b = laonline_v12_input(b, menu); }  // V12: B / R3 observer (PvP, dive assist)
-    { extern uint64_t ztarget_input(uint64_t, int); b = ztarget_input(b, menu); }  // V15: ZL = Z-targeting (runtime/hle/ztarget.c)
-    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly) + script_ly);
-    { extern int laonline_v12_stagger(void); if (!menu && laonline_v12_stagger()) lx = ly = 0; }  // V13.5 PvP: hit stagger
-    { extern void ztarget_stick(int32_t *, int32_t *); if (!menu) ztarget_stick(&lx, &ly); }  // V15: circle the Z-target
+    {   // --load-save (runtime/hle/load_save.c): the presses that take the title and the file select into the save
+        extern uint64_t load_save_buttons(void);
+        b |= load_save_buttons();
+    }
+    extern bool laonline_configured(void);
+    if (laonline_configured()) {  // online play, on this PC's Player 1 (runtime/hle/laonline_v12.c, ztarget.c): B and R3
+                                  // seen for PvP and the dive assist, ZL as Z-targeting
+        extern uint64_t laonline_v12_input(uint64_t, int), ztarget_input(uint64_t, int);
+        b = laonline_v12_input(b, menu);
+        b = ztarget_input(b, menu);
+    }
+    int32_t tlx, tly;
+    touch_stick(&tlx, &tly);
+    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + tlx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + tly) + script_ly);
+    if (!menu && laonline_configured()) {  // online play: a PvP hit staggers (the stick held still), Z-targeting
+                                           // circles the target
+        extern int laonline_v12_stagger(void);
+        extern void ztarget_stick(int32_t *, int32_t *);
+        if (laonline_v12_stagger()) lx = ly = 0;
+        ztarget_stick(&lx, &ly);
+    }
     int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry) + script_ry);
+    if (!menu) {  // d-pad items (setting): the Items page assigns, play uses (runtime/hle/dpad_items.c; before mirroring:
+        extern uint64_t dpad_items_input(uint64_t b);  // the d-pad as held)
+        b = dpad_items_input(b);
+    }
+    {   // local co-op: another player's talk plays on Player 1, and his A, B and directions move its text on too
+        extern int coop_talker(void);
+        int t = coop_talker();
+        if (t >= 1 && t <= COOP_PADS) {
+            uint64_t tb = (menu ? 0 : coop_btn[t - 1]) | coop_script_btn[t - 1];
+            b |= tb & ((1ull << BTN_A) | (1ull << BTN_B) | (0xfull << 12));
+            lx = clamp_axis(lx + (menu ? 0 : coop_axis[t - 1][0]) + coop_script_axis[t - 1][0]);
+            ly = clamp_axis(ly + (menu ? 0 : coop_axis[t - 1][1]) + coop_script_axis[t - 1][1]);
+        }
+    }
     extern bool mirror_input(void);  // mirror mode, the world on screen (runtime/hle/mirror.c): left and right swap
     bool mirrored = !menu && mirror_input();
     if (mirrored) {
@@ -799,7 +1480,7 @@ static void fill_state(Cpu *c) {
     }
     // d-pad / arrow keys walk (setting) while the stick is at rest. "At rest" has a dead zone: a controller's stick
     // never reads exactly 0 (a DualSense rests at a few hundred), which used to turn the d-pad off altogether.
-    if (!menu && g_settings.dpad_move && (int64_t)lx * lx + (int64_t)ly * ly < 8000ll * 8000) {
+    if (!menu && g_settings.dpad_mode == DPAD_MOVE && (int64_t)lx * lx + (int64_t)ly * ly < 8000ll * 8000) {
         uint64_t d = key_buttons | pad_buttons | script_buttons;
         int dx = (int)((d >> BTN_RIGHT) & 1) - (int)((d >> BTN_LEFT) & 1);
         if (mirrored) dx = -dx;
@@ -812,10 +1493,12 @@ static void fill_state(Cpu *c) {
         g_stick_lx = lx, g_stick_ly = ly;
         extern uint64_t g_stick_freeze_until;
         extern uint64_t renderer_present_count(void);
-        if (renderer_present_count() < g_stick_freeze_until) {
-            lx = ly = 0;
+        extern int coop_reviving(int player), coop_revive_reach(int player);  // (local co-op: holding A beside a
+        if (renderer_present_count() < g_stick_freeze_until || coop_reviving(0)) {  // knocked-out player stands still
+            lx = ly = 0;                                                             // too, his A the revive's)
             b &= ~(0xfull << 12);
         }
+        if (coop_revive_reach(0)) b &= ~(1ull << BTN_A);
     }
     // stick directions also appear as buttons (bits 16-23)
     if (lx < -16000) b |= 1ull << 16;
@@ -859,17 +1542,31 @@ HLE_FUNC("_ZN2nn3hid15GetNpadStyleSetERKj", hid_style_set) {
     uint32_t id = *(uint32_t *)(uintptr_t)c->x[0];
     static int nlog;
     if (nlog++ < 4) LOG("[input] GetNpadStyleSet id %#x\n", id);
-    c->x[0] = id == 0 ? 1 : 0;  // docked: no handheld controller
+    extern int rt_coop_players(void);  // (local co-op: npad 2.. for players 2.. in the game)
+    extern uint32_t coop_joined(void);
+    c->x[0] = id == 0 || (id < 8 && rt_coop_players() > 1 && (coop_joined() >> id & 1)) ? 1 : 0;  // docked: no handheld
 }
 
 // BindNpadStyleSetUpdateEvent(id, SystemEventType*, clear mode): signaled once so the game sees a
-// controller connected.
+// controller connected. Kept: when local co-op's player count changes (runtime/hle/coop.c), they are signaled again,
+// so the game reads the style sets again and sees players 2.. connected (or gone).
 #include "../kernel.h"
+static KEvent *g_style_ev[16];
+static int g_style_n;
+RT_ON_RESET(input_style_reset) { g_style_n = 0; }
+
+void input_style_changed(void) {
+    pthread_mutex_lock(&g_klock);
+    for (int i = 0; i < g_style_n; i++) kernel_signal(g_style_ev[i]);
+    pthread_mutex_unlock(&g_klock);
+}
+
 HLE_FUNC("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", hid_bind_style_event) {
     uint32_t w, r;
     KEvent *ev = kernel_create_event_pair(&w, &r);
     pthread_mutex_lock(&g_klock);
     kernel_signal(ev);
+    if (g_style_n < (int)(sizeof g_style_ev / sizeof *g_style_ev)) g_style_ev[g_style_n++] = ev;
     pthread_mutex_unlock(&g_klock);
     uint64_t clear_mode = c->x[2];
     c->x[0] = c->x[1];
@@ -896,6 +1593,6 @@ HLE_FUNC("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21
     uint32_t *info = (uint32_t *)(uintptr_t)c->x[0];
     uint32_t h = *(uint32_t *)(uintptr_t)c->x[1];
     info[0] = 1;        // VibrationDeviceType_LinearResonantActuator
-    int side = rumble_side(h);
+    int player, side = rumble_slot(h, &player);  // (local co-op's players 2.. too)
     info[1] = side < 0 ? 0 : (uint32_t)side + 1;  // None=0, Left=1, Right=2
 }

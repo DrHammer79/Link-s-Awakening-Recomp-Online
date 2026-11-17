@@ -40,8 +40,6 @@ static ssize_t test_write(int fd, const void *p, size_t n, off_t off) {
 #include "../runtime/services/fs.c"
 #undef pwrite
 #undef fsync
-// The read-only event observer is outside these filesystem transaction tests.
-void lao_dev_save(const char *path,int success) {(void)path;(void)success;}
 const char *g_romfs_dir;
 int rt_romfs_files;
 uint64_t rt_romfs_bytes;
@@ -54,9 +52,18 @@ void enemy_random_filter(const char *p, uint64_t off, uint8_t *d, uint64_t n) {}
 void rt_fatal_msg(const char *fmt, ...) { abort(); }
 void rt_fatal_trace(void) { abort(); }
 void save_editor_file_read(const char *p, uint64_t a, int64_t o, int64_t n) {}
+void weather_cycle_save_read(const char *p, uint64_t a, int64_t o, int64_t n) {}  // (runtime/nvn/weather_cycle.c)
+void weather_cycle_save_written(const char *p, uint64_t a, int64_t o, int64_t n) {}
+void dpad_items_save_read(const char *p, uint64_t a, int64_t o, int64_t n) {}  // (runtime/hle/dpad_items.c)
+void dpad_items_save_written(const char *p, uint64_t a, int64_t o, int64_t n) {}
 void pace_hitch(const char *why) {}  // (runtime/nvn/pace.c: a save commit is a stall)
+// local co-op (runtime/hle/coop.c): its RomFS patch (not indexed here), and the frame of a save's commit
+bool coop_romfs_patch(const char *p, uint64_t off, uint64_t size, ssize_t (*rd)(void *, uint64_t, uint64_t),
+                      uint64_t *at, uint32_t *val) { abort(); }
+int rt_coop_on(void) { return 0; }
+uint64_t renderer_present_count(void) { return 0; }  // (runtime/nvn: fs.c notes a save's frame for the co-op HUD)
 static int notices;  // save-failed warnings shown (fs.c tells the player once per run)
-void plat_notice(const char *text) { notices++; }
+void menu_save_failed(const char *folder) { notices++; }
 #ifdef __linux__
 void plat_os_write(uint64_t addr, uint64_t size) { (void)addr; (void)size; }  // (fs.c's file reads: no soft write tracking here)
 #endif
@@ -72,7 +79,10 @@ const GameAddrs *g_ga = &test_ga;
 const GameVersion *game_version(void) { return NULL; }
 uint64_t game_romfs_bytes(const GameVersion *v) { return 0; }
 GameRomfsCheck *game_romfs_check_begin(const GameVersion *v) { return NULL; }
-bool game_romfs_check_file(GameRomfsCheck *c, const char *rel, uint64_t size) { return true; }
+bool game_romfs_check_file(GameRomfsCheck *c, const char *rel, uint64_t size, uint64_t *bytes) {
+    if (bytes) *bytes += size;
+    return true;
+}
 int game_romfs_check_end(GameRomfsCheck *c) { return 0; }
 bool game_romfs_exefs_copy(const char *game_dir, const char *rel, uint64_t size) { return false; }
 __attribute__((constructor)) static void test_ga_init(void) { test_ga.LIVE_SAVE = (uintptr_t)live_save; }

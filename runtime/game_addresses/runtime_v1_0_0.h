@@ -24,11 +24,19 @@ GA_ADDR(PLAYER_COLLISION_VT,              0x7001c501f0)
 GA_ADDR(FLAG_PTR,                         0x7001cc1388)
 GA_ADDR(FLAG_CAP,                         0x7001cc1390)
 GA_ADDR(LIVE_SAVE,                        0x7001cbb220)
+GA_ADDR(HUD_SETUP,                        0x7000ea84f0)
 GA_ADDR(COMPANION_SPAWN,                  0x7000d53c20)
 GA_ADDR(COMPANION_LEAVE,                  0x7000d53ed0)
 GA_ADDR(ACTOR_KILL,                       0x7000fabf70)
 GA_ADDR(ACTOR_REGISTRY,                   0x7001cb2d00)
+GA_ADDR(TREE_BONK,                        0x7000cb04e0)
+GA_ADDR(LINK_HIT_FILTER,                 0x7000d4ce50)
+GA_ADDR(LINK_DAMAGE_CB,                  0x7000d4c690)
+GA_ADDR(BUZZBLOB_ATTACK,                 0x70016efe94)
+GA_ADDR(LINK_DEFENCE,                    0x7001701178)
 GA_ADDR(ADD_ITEM,                         0x70007e18b0)
+GA_ADDR(BUFF_MUSIC_START,                 0x70000af560)
+GA_ADDR(BUFF_MUSIC_STOP,                  0x70000afa60)
 GA_ADDR(PLAY_SYSTEM_SE,                   0x70000a57e0)
 GA_ADDR(SINKING_SWORD_VTABLE,             0x7001c0e4e0)
 GA_ADDR(ITEM_HEART_PIECE_VTABLE,          0x7001bc9d50)
@@ -79,3 +87,58 @@ GA_ADDR(ENEMY_LIFE_VTABLE,               0x7001b5be00)
 GA_ADDR(MAIN_CODE_SIZE,                  0x16a0000)
 GA_ADDR(DELEGATE_JOB_VTABLE_LIVE,         0x7001c51308)
 GA_ADDR(DELEGATE_JOB_VTABLE_BASE,         0x7001c51358)
+// The graphics library's (nn::gfx) command buffer memory event: the NVN callback that passes it to the buffer's own
+// handlers (runtime/nvn/cmdbuf.c); 0 = not in this version
+GA_ADDR(GFX_CMDBUF_MEMORY_EVENT,          0x0)
+// Local co-op (runtime/hle/coop.c; 0 = not in this version): Link's actor class (its objects' vtable pointer)
+GA_ADDR(PLAYER_VTABLE,                    0x0)
+GA_ADDR(PLAYER_MAX_HEALTH,                0x0)
+GA_ADDR(PLAY_ANIMATION,                   0x0)
+GA_ADDR(DOACTION_CURRENT,                 0x0)
+GA_ADDR(DOACTION_PENDING,                 0x0)
+GA_ADDR(DOACTION_COOLDOWN,                0x0)
+GA_ADDR(DOACTION_TAKE_RET,                0x0)
+GA_ADDR(DOACTION_CHECK_RET,               0x0)
+GA_ADDR(DOACTION_TRIGGER,                 0x0)
+// Local co-op (runtime/hle/coop/targets.inc; 0 = not in this version): the actor factory's type table (0x58 bytes a
+// type, +0x50 its name)
+GA_ADDR(ACTOR_TYPES,                      0x0)
+// Local co-op (runtime/hle/coop/spawn.inc; 0 = not in this version): the game manager's player set (x0 the manager,
+// x1 a shared_ptr: its +0x4b8 / +0x4c0 assigned, references counted)
+GA_ADDR(COOP_SET_PLAYER,                  0x0)
+// Online play (runtime/hle/laonline*.c), from LA-Online V15.2 (found on 1.0.0; 1.0.1's checked against its code: the
+// same instructions, calls and vtable slots - two functions moved by 0xd0). Another PC's player is a Shadow Link actor:
+// his Pop entrance (shown, rising, hits off)
+GA_ADDR(LAONLINE_SL_POP,                  0x7000d117c0)
+// ... shown again (x1 1), his +0x1700 "shown" mark
+GA_ADDR(LAONLINE_SL_SHOW,                 0x7000d14820)
+// an empty function (ret): his states' updates made this
+GA_ADDR(LAONLINE_SL_STATE_NOP,            0x7000d10050)
+// a bl to the transform's position setter (its target read)
+GA_ADDR(LAONLINE_SL_POSITION_CALL,        0x7000d15b08)
+// ... and to its rotation setter
+GA_ADDR(LAONLINE_SL_ROTATION_CALL,        0x7000d106c8)
+// his model set-up (Shadow Link vtable +0x20)
+GA_ADDR(LAONLINE_SL_SETUP,                0x7000d09e30)
+// ... returned to here when his actor is made
+GA_ADDR(LAONLINE_SL_SETUP_RET,            0x7000d07738)
+// a resource handle to its archive (as Link's model is found)
+GA_ADDR(LAONLINE_RESOURCE_GET,            0x7000057d50)
+// the model component's vtable
+GA_ADDR(LAONLINE_MODEL_COMPONENT_VT,      0x7001c4a060)
+// ... its model instance's
+GA_ADDR(LAONLINE_MODEL_INSTANCE_VT,       0x7001c47640)
+// a mesh of a model instance shown / hidden (x1 index, x2 on)
+GA_ADDR(LAONLINE_MESH_SET_VISIBLE,        0x700104fae0)
+// his movement collider component's vtable
+GA_ADDR(LAONLINE_COLLIDER_VT,             0x7001c17278)
+// ... its "set enabled" (vtable +0xa8)
+GA_ADDR(LAONLINE_COLLIDER_SET_ENABLED,    0x70010b5d40)
+// a recovery heart item's vtable
+GA_ADDR(LAONLINE_HEART_VT,                0x7001bc7268)
+// ... its pickup (a vtable slot)
+GA_ADDR(LAONLINE_HEART_PICKUP_SLOT,       0x7001bc7680)
+// ... that function
+GA_ADDR(LAONLINE_HEART_PICKUP,            0x70008a3960)
+// the game's UI pages list (its sentinel node)
+GA_ADDR(LAONLINE_UI_REGISTRY,             0x7001c97b10)

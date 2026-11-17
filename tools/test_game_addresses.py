@@ -46,7 +46,8 @@ for key in VERSIONS:
     patch_values, runtime_values = load_table(table_path(key)), load_table(table_path(key, 'runtime'))
     assert not patch_values.keys() & runtime_values.keys(), f'{key}: define each address in one header'
     values = patch_values | runtime_values
-    assert len(values) == len(set(values.values())), f'{key}: use the existing name for shared addresses'
+    present = [v for v in values.values() if v]  # (0: not in this version - e.g. co-op is 1.0.1 only)
+    assert len(present) == len(set(present)), f'{key}: use the existing name for shared addresses'
     tables[key] = (patch_values, runtime_values)
     if key != 'v1_0_0':  # same names in the same order (the C struct is laid out from v1_0_0's)
         assert list(patch_values) == list(tables['v1_0_0'][0]), f'patches_{key}.h names differ from v1_0_0'
@@ -89,12 +90,26 @@ except AttributeError:
 else:
     raise AssertionError('An unknown address name was accepted')
 assert all(a < 0x7004000000 for a in list(patches.PATCHES) + list(patches.HOOKS)), 'patch sites are main addresses'
-# every version: the same patches and hooks, at that version's addresses
+# every version: the same patches and hooks, at that version's addresses (local co-op's hooks only where it has them:
+# all of its addresses, none left at 0 - a hook at 0 is dropped, and nothing else would notice)
+own_hooks = None
 for key in VERSIONS:
     select_version(key)
     p = importlib.reload(patches)
-    assert len(p.PATCHES) == len(fixture['patches']) and len(p.HOOKS) == len(patches.HOOKS), key
-    assert set(p.PATCHES) | set(p.HOOKS) <= set(tables[key][0].values()), key
+    own = set(p.HOOKS) - set(p._COOP_HOOKS)
+    own_hooks = len(own) if own_hooks is None else own_hooks
+    # (local co-op's reads of "Link" are patches too, listed per version - runtime/game_addresses/
+    # coop_player_reads_<version>.txt, not the address tables: each an `ldr xT, [xN, #0x4b8]`, none a hook)
+    reads = set(p._PLAYER_READS)
+    assert all((w & 0xffc00000) == 0xf9400000 and ((w >> 10) & 0xfff) * 8 == 0x4b8 for w in p._PLAYER_READS.values()), key
+    assert not reads & set(p.HOOKS), key
+    assert len(set(p.PATCHES) - reads) == len(fixture['patches']) and len(own) == own_hooks, key
+    assert (set(p.PATCHES) - reads) | set(p.HOOKS) <= set(tables[key][0].values()), key
+    coop = {n: v for n, v in tables[key][0].items() if n.startswith('COOP_')}
+    if coop.get('COOP_CREATE_SITE'):
+        assert all(coop.values()), f'{key}: co-op addresses at 0: {[n for n, v in coop.items() if not v]}'
+        assert set(p._COOP_HOOKS) <= set(p.HOOKS), key
+        assert len(reads) > 500, f'{key}: {len(reads)} reads of "Link" listed'
 select_version('v1_0_0')
 patches = importlib.reload(patches)
 
@@ -127,6 +142,12 @@ if (argc == 3 && !strcmp(argv[1], "label")) {  // label <exefs folder>
     puts(l ? l : "none");
     return 0;
 }
+if (argc == 3 && !strcmp(argv[1], "main")) {  // main <exefs/main>: what it is, and its build ID
+    char hex[41] = "x";
+    GameMainKind k = game_main_build_id(argv[2], hex);
+    printf("%s %s\n", k == GAME_MAIN_NSO ? "nso" : k == GAME_MAIN_MISSING ? "missing" : "not-nso", hex[0] ? hex : "-");
+    return 0;
+}
 if (argc == 3 && !strcmp(argv[1], "select")) {  // select <game folder>
     char why[256] = "";
     int ok = game_version_select(argv[2], why, sizeof why);
@@ -142,11 +163,13 @@ if ((argc == 3 || argc == 4) && !strcmp(argv[1], "romfs")) {
     GameRomfsCheck *c = game_romfs_check_begin(v);
     char line[1100], path[1024];
     unsigned long long size;
+    uint64_t bytes = 0;
     while (fgets(line, sizeof line, stdin)) {
         if (sscanf(line, "%llu %1023[^\n]", &size, path) != 2) continue;
         if (argc == 4 && game_romfs_exefs_copy(argv[3], path, size)) printf("copy %s\n", path);
-        else if (!game_romfs_check_file(c, path, size)) printf("odd %s %llu\n", path, size);
+        else if (!game_romfs_check_file(c, path, size, &bytes)) printf("odd %s %llu\n", path, size);
     }
+    printf("bytes %llu %llu\n", (unsigned long long)bytes, (unsigned long long)game_romfs_bytes(v));
     printf("missing %d\n", game_romfs_check_end(c));
     return 0;
 }
@@ -190,6 +213,18 @@ assert native('select', g1)[:2] == ['1', 'v1_0_1']
 out = native('select', gx)
 assert out[0] == '0' and 'unsupported version' in ' '.join(out), out
 assert native('select', tmp/'missing')[0] == '0'
+# what the launcher logs when it refuses game files (#696: the log had no build ID, a player had to hexdump exefs/main)
+assert native('main', gx/'exefs/main') == ['nso', '11' * 20]
+assert native('main', g1/'exefs/main') == ['nso', VERSIONS['v1_0_1'][1].upper()]
+assert native('main', tmp/'missing/exefs/main') == ['missing', '-']
+gn = tmp/'gn/exefs'
+gn.mkdir(parents=True)
+(gn/'main').write_bytes(b'NCA3' + bytes(0x5c))  # (another container, header long enough)
+assert native('main', gn/'main') == ['not-nso', '-']
+out = native('select', gn.parent)
+assert out[0] == '0' and 'NSO0' in ' '.join(out), out
+(gn/'main').write_bytes(b'NSO0' + bytes(0x10))  # (cut short before the build ID)
+assert native('main', gn/'main') == ['not-nso', '-']
 
 # ---- the RomFS file check (runtime/game_addresses/romfs_files.h, from tools/romfs_files.py): hashes only
 import romfs_files  # noqa: E402
@@ -201,18 +236,29 @@ for rel, size in (('region_common/event/x.bfevfl', 2712), ('a', 0), ('b c/d.bin'
     assert int(native('hash', rel, size)[0], 16) == romfs_files.entry_hash(rel, size), rel
 
 
-def romfs_check(build_id, files, game=None):
+def romfs_check(build_id, files, game=None, bytes_out=None):
+    # the odd and copied files, how many of the version's are missing; bytes_out: [the game's files' bytes, the
+    # version's total]
     out = subprocess.run([str(exe), 'romfs', build_id] + ([str(game)] if game else []),
                          input=''.join(f'{n} {p}\n' for p, n in files), encoding='utf-8',
                          capture_output=True, check=True).stdout.splitlines()
-    assert out[-1].startswith('missing '), out
-    return out[:-1], int(out[-1].split()[1])
+    assert out[-1].startswith('missing ') and out[-2].startswith('bytes '), out
+    if bytes_out is not None:
+        bytes_out[:] = map(int, out[-2].split()[1:])
+    return out[:-2], int(out[-1].split()[1])
 
 
 made_up = [('region_common/made_up.bin', 12), ('Ä/ü.bin', 3)]
 assert romfs_check('-', made_up) == ([], 0)  # (no version: no check)
 for key, (label, bid) in VERSIONS.items():
     assert romfs_check(bid, made_up) == (['odd region_common/made_up.bin 12', 'odd Ä/ü.bin 3'], 3836), key
+# the files that aren't the game's add no bytes (#553: a 6 GB extra file in romfs tripped "damaged or changed"); with no
+# version every file's are added
+total = []
+romfs_check(VERSIONS['v1_0_1'][1], made_up + [('extra.bin', 6314471936)], bytes_out=total)
+assert total == [0, 6232003903], total
+romfs_check('-', made_up, bytes_out=total)
+assert total == [15, 0], total
 
 # copies of the game code's six exefs files at the romfs root (#389: 3842 files) are skipped, only when each is the
 # same file as its exefs one; any other extra there is still odd
@@ -304,9 +350,17 @@ if games:
     # every RomFS file is one of its version's, every one of them there
     for key, folder in games.items():
         files = romfs_files.romfs_files(folder/'romfs')
-        out, missing = romfs_check(VERSIONS[key][1], sorted(files.items()), folder)
+        total = []
+        out, missing = romfs_check(VERSIONS[key][1], sorted(files.items()), folder, total)
         copies = [line for line in out if line.startswith('copy ')]
         assert out == copies and not missing, (key, out[:20], missing)
+        assert total[0] == total[1], (key, total)  # (the game's files add up to the version's total)
+        # an extra file beside them leaves the total; one of them a byte longer is odd, missing and short
+        extra = romfs_check(VERSIONS[key][1], sorted(files.items()) + [('extra.bin', 5)], folder, total)
+        assert extra == (copies + ['odd extra.bin 5'], 0) and total[0] == total[1], (key, extra, total)
+        (rel, size), *rest = sorted(files.items())
+        out, missing = romfs_check(VERSIONS[key][1], [(rel, size + 1)] + rest, folder, total)
+        assert missing == 1 and f'odd {rel} {size + 1}' in out and total[0] == total[1] - size, (key, missing, total)
         print(f'{key}: {len(files) - len(copies)} RomFS files, all the game\'s' +
               (f' ({len(copies)} copies of the game code at the root, ignored)' if copies else ''))
     from nso import Nso
@@ -360,8 +414,9 @@ if games:
                 continue
             mapper = version_map.Mapper(games['v1_0_0'], games[key])
             for kind in ('patches', 'runtime'):
-                src = table_path('v1_0_0', kind)
-                text, _ = version_map.map_header(src.read_text(encoding='utf-8'), load_table(src), mapper, VERSIONS[key][0])
+                src, dst = table_path('v1_0_0', kind), table_path(key, kind)
+                text, _ = version_map.map_header(src.read_text(encoding='utf-8'), load_table(src), mapper, VERSIONS[key][0],
+                                                 load_table(dst))  # (what 1.0.0 doesn't have: the table's own)
                 assert text == table_path(key, kind).read_text(encoding='utf-8'), f'{kind}_{key}.h: run tools/version_map.py'
             print(f'{key}: the committed tables match tools/version_map.py')
 

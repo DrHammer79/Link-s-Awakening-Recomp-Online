@@ -11,6 +11,13 @@
 
 #define BACKDROP_HASHES 0x71fe31bbf03c3515ull
 
+static bool backdrop_hash(uint64_t hash) {  // (one of BACKDROP_HASHES)
+    static const uint64_t known[] = {BACKDROP_HASHES};
+    for (unsigned i = 0; i < sizeof known / sizeof known[0]; i++)
+        if (known[i] && hash == known[i]) return true;
+    return false;
+}
+
 static float g_wide = 1.0f;  // output aspect divided by 16:9 (1 = normal)
 
 void widescreen_set_factor(float f) { g_wide = f; }
@@ -19,21 +26,57 @@ float widescreen_factor(void) { return g_wide; }
 // Effects drawn as a mesh around the camera, sized to cover a 16:9 view: with the widened camera their outer edge
 // shows (Mysterious Woods fog ring: a hard-edged oval at 32:9, a stray cloud piece at the far left). Their draws
 // get a viewport widened by the widescreen factor (centred), so they cover the window as they cover 16:9.
-// Identified by fragment shader hash (both backends hash the shader code the same way).
-float widescreen_effect_stretch(uint64_t fs_hash) {
+// Identified by fragment shader hash (both backends hash the shader code the same way). The co-op camera zoom reaches
+// further both ways (indoors widening the view, rt_fovy; on the Field moving the camera back): such an effect is then
+// stretched by it both ways too (*ky the vertical stretch).
+float widescreen_effect_stretch(uint64_t fs_hash, float *ky) {
     static const uint64_t k[] = {
         0xffad3b2d795231a7ull,  // Mysterious Woods fog ring (Field 06C...; found 2026-10-09 by skipping shaders)
         0xd66b33b13b2eac29ull,  // Mysterious Woods haze layer
         0x1372d4fe34dd4bb4ull,  // Mysterious Woods light-shaft boxes (their sides: vertical streaks at the far left)
     };
-    if (g_wide <= 1.0f) return 1.0f;
-    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++)
-        if (k[i] == fs_hash) return g_wide;
+    extern float coop_camera_reach(void);  // runtime/hle/coop.c (1: the game's own view; zoomed: widened or moved back)
+    float zoom = ENV("LARECOMP_NO_ZOOM_STRETCH") ? 1.0f : coop_camera_reach(), wide = g_wide > 1.0f ? g_wide : 1.0f;
+    *ky = 1.0f;
+    if (wide <= 1.0f && zoom <= 1.0f) return 1.0f;
+    // the interior backdrop (behind houses' rooms: its glow showed as a hard circle zoomed out, "Indoor zoom"; interiors
+    // stay 16:9 in a wide window, so only the zoom)
+    if (backdrop_hash(fs_hash)) {
+        if (zoom <= 1.0f) return 1.0f;
+        *ky = zoom;
+        return zoom;
+    }
+    bool known = false;
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) known |= k[i] == fs_hash;
     // dungeon darkness around the camera: a hard-edged dark oval once a room shows wider than 16:9 (boxed rooms
-    // keep the original vignette)
+    // keep the original vignette), or zoomed out - a boxed room by the zoom alone (its 16:9 centre is what shows)
     extern bool g_room_wide;
-    if (fs_hash == 0xc42e882c08c5e5ebull && g_room_wide) return g_wide;
-    return 1.0f;
+    if (fs_hash == 0xc42e882c08c5e5ebull) {
+        if (zoom > 1.0f) { *ky = zoom; return (g_room_wide ? wide : 1.0f) * zoom; }
+        if (g_room_wide) return wide;
+    }
+    if (!known) return 1.0f;
+    // the camera moved back instead (outdoors): the woods' fog is a mesh around Player 1, not the camera, and from
+    // further back its near side shrinks more than its middle - stretched by the zoom alone its edge showed in the
+    // window's corners (2x and 3x)
+    extern float coop_camera_zoom(void);
+    if (coop_camera_zoom() == 1.0f && zoom > 1.0f) zoom = 1.0f + (zoom - 1.0f) * 1.6f;
+    *ky = zoom;
+    return wide * zoom;
+}
+
+// Effects not drawn at all with the co-op camera moved back (outdoors): Yarna Desert's warm haze is a disc around
+// Player 1 that covers the 16:9 view, and from further back its edge showed as a hard circle on the sand (user
+// 2026-10-28). It refracts the picture behind it, so stretched (as the woods' fog) it ghosted a copy of the rocks
+// over the water beside the desert; without it the sand is as the rest of the Field. Found by skipping shaders.
+// The Mysterious Woods' fog seen from outside them (a box of fog over their edge, 18 vertices, reading the depth;
+// not drawn inside, where the ring, haze and shafts above are): sized for the game's view from beside the woods,
+// from further back its sides showed - a flat blue band with hard edges over the woods from Mabe Village (user
+// 2026-10-30). Found by its pass (LARECOMP_DEBUG_FRAME): the one draw between the scene and its lighting.
+bool widescreen_effect_hidden(uint64_t fs_hash) {
+    extern float coop_camera_zoom(void), coop_camera_reach(void);  // runtime/hle/coop.c
+    return (fs_hash == 0x16c48ff5e6bcfea3ull || fs_hash == 0x39ae199ddc1701dcull) && coop_camera_zoom() == 1.0f &&
+           coop_camera_reach() > 1.05f;
 }
 
 // Untextured quads drawn with a full-screen viewport are taken for fades and flashes and fill the window
@@ -99,20 +142,26 @@ float rt_cull_aspect(float orig) {
 
 // Sky and sea pieces past the north edge (tools/patches.py SKYSEA_BOX_SITES): a piece shows while Link is within
 // its reach plus half a 16:9 view (7.5). A wider view reaches further: half its extra width, doubled for the far
-// (top) edge of the perspective view, where the sky is.
+// (top) edge of the perspective view, where the sky is. Local co-op's zoomed-out camera reaches further the same way.
+extern float coop_camera_zoom(void);   // runtime/hle/coop.c (1: the game's own view)
+extern float coop_camera_reach(void);  // (... widened or moved back)
 float rt_skysea_margin(void) {
-    return g_wide > 1.0f ? 15.0f * (g_wide - 1.0f) : 0.0f;
+    float w = (g_wide > 1.0f ? g_wide : 1.0f) * coop_camera_reach();
+    return w > 1.0f ? 15.0f * (w - 1.0f) : 0.0f;
 }
 
 // Vertical field of view: unchanged for wide outputs; for tall ones (factor < 1) widened so the
-// horizontal view stays what the game shows at 16:9.
+// horizontal view stays what the game shows at 16:9. Local co-op's zoomed-out camera widens it again indoors, by its
+// zoom (the camera and the culling pass both load it here, so what comes into view is drawn; on the Field the zoom
+// moves the camera back instead: coop_camera_zoom() is 1 there).
 float rt_fovy(float orig) {
     static float last = -1;
     if (orig != last && ENV("LARECOMP_LOG_CULL")) { LOG("[widescreen] fovy field %f\n", orig); last = orig; }
-    if (g_wide >= 1.0f || !(orig > 0)) return orig;
+    float zoom = coop_camera_zoom();
+    if ((g_wide >= 1.0f && zoom == 1.0f) || !(orig > 0)) return orig;
     bool degrees = orig > 3.2f;  // radians otherwise
     float half = (degrees ? orig * (float)M_PI / 180.0f : orig) * 0.5f;
-    float wide = 2.0f * atanf(tanf(half) / g_wide);
+    float wide = 2.0f * atanf(tanf(half) / (g_wide < 1.0f ? g_wide : 1.0f) * zoom);
     return degrees ? wide * 180.0f / (float)M_PI : wide;
 }
 
@@ -132,9 +181,7 @@ void romfs_file_read_hook(const char *path) { (void)path; }
 static uint64_t g_backdrop_hash = 0;  // set below once known
 static uint64_t g_backdrop_frame = ~0ull;
 void widescreen_backdrop_seen(uint64_t hash) {
-    static const uint64_t known[] = {BACKDROP_HASHES};
-    for (unsigned i = 0; i < sizeof known / sizeof known[0]; i++)
-        if (known[i] && hash == known[i]) { extern uint64_t renderer_exec_frame(void); g_backdrop_frame = renderer_exec_frame(); }
+    if (backdrop_hash(hash)) { extern uint64_t renderer_exec_frame(void); g_backdrop_frame = renderer_exec_frame(); }
     (void)g_backdrop_hash;
 }
 // Interiors and dungeons only render their 16:9 centre. Besides the backdrop detection, the game's current level
@@ -184,19 +231,17 @@ void widescreen_scene_ubo(const float *u, uint64_t size) {
     g_vp_frame = f;
 }
 
-// Project a game-world point through the verified scene UBO captured above.
-// Returns NDC (-1..1) and false behind the camera, outside the view, or while
-// no scene camera was captured recently. Used by runtime-only LA-Online tags.
+// A world point through the scene camera above (as drawn: with the co-op zoom), to normalized device coordinates
+// (-1..1). False behind the camera, outside the view or with no scene camera in the last 2 frames. (Online play's
+// name tags and markers, runtime/ui/laonline_overlay.mm.)
 bool widescreen_world_to_ndc(float x, float y, float z, float *nx, float *ny) {
     extern uint64_t renderer_exec_frame(void);
     uint64_t f = renderer_exec_frame();
     if (g_vp_frame == ~0ull || f < g_vp_frame || f - g_vp_frame > 2) return false;
-    float p[4] = {x, y, z, 1.0f}, clip[4];
-    for (int r = 0; r < 4; ++r)
-        clip[r] = g_vp[r * 4] * p[0] + g_vp[r * 4 + 1] * p[1] +
-                  g_vp[r * 4 + 2] * p[2] + g_vp[r * 4 + 3];
+    float clip[4];
+    for (int r = 0; r < 4; ++r) clip[r] = g_vp[r * 4] * x + g_vp[r * 4 + 1] * y + g_vp[r * 4 + 2] * z + g_vp[r * 4 + 3];
     if (!(clip[3] > 0.001f)) return false;
-    *nx = clip[0] / clip[3]; *ny = clip[1] / clip[3];
+    *nx = clip[0] / clip[3], *ny = clip[1] / clip[3];
     return isfinite(*nx) && isfinite(*ny) && fabsf(*nx) <= 1.08f && fabsf(*ny) <= 1.08f;
 }
 
@@ -233,6 +278,13 @@ static bool current_zone(float lo[3], float hi[3], uint32_t *id) {
     return true;
 }
 
+// Whether the camera zone is a side-view room (thin in z: the camera looks along z). (Local co-op: runtime/hle/coop.c.)
+bool game_side_view(void) {
+    float lo[3], hi[3];
+    uint32_t id;
+    return current_zone(lo, hi, &id) && hi[2] - lo[2] < 6.0f;
+}
+
 // The current camera zone record (a dungeon room, an interior), 0 when there is none (overworld, title, loading).
 // (Frame pacing: runtime/nvn/pace.c - a room change is a new scene.)
 uint64_t game_camera_zone(void) {
@@ -241,11 +293,18 @@ uint64_t game_camera_zone(void) {
     return current_zone(lo, hi, &id) ? LD64(LD64(GA(SDK_SYSTEM_OBJECT)) + 0x680) : 0;
 }
 
+// The camera zone's id (a dungeon room, an interior; Show advanced information's "where you are"); false: none
+bool game_camera_zone_id(uint32_t *id) {
+    float lo[3], hi[3];
+    return current_zone(lo, hi, id);
+}
+
 // Horizontal crop (uv of the wide image): ROOM_CROP for a room wider than one screen (u0..u1), ROOM_BOX for a
 // single-screen room (16:9 box), ROOM_FULL when the zone doesn't match the camera (no box: the game's camera clamps
 // for the wide view, so a 16:9 box around a stale zone's centre cut Link out - user 2026-10-09), ROOM_KEEP when
 // there's no recent scene camera (keep the last choice; after half a second without one, e.g. menus: box).
 enum { ROOM_KEEP, ROOM_BOX, ROOM_CROP, ROOM_FULL };
+const char *game_level_name(void);
 static int room_crop(uint64_t frame, double shape, float *u0, float *u1) {
     float lo[3], hi[3];
     uint32_t id;
@@ -279,8 +338,10 @@ static int room_crop(uint64_t frame, double shape, float *u0, float *u1) {
         // holds whole shows black on both sides.
         float ndc[2];
         r = ROOM_CROP;
+        // The fishing pond is built 3 units past its zone's west edge (x -12), which its fixed camera never shows at 16:9
+        float west = side && !strcmp(game_level_name(), "FishingPond") ? 3.0f : 0.0f;
         for (int e = 0; e < 2; e++) {
-            float x = e ? cmax + mid16 : cmin - mid16;
+            float x = e ? cmax + mid16 : cmin - mid16 - west;
             float w = r3[0] * x + r3[1] * c[1] + r3[2] * c[2] + r3[3];
             if (!(w > 0.01f)) return ROOM_KEEP;
             ndc[e] = (r0[0] * x + r0[1] * c[1] + r0[2] * c[2] + r0[3]) / w;
@@ -316,11 +377,16 @@ void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double
         if (game_in_play()) room_crop(frame, shape, &a, &b);
     }
     if (shape == 1.0 || !widescreen_frame_boxed(frame)) return;
+    extern void hud_corners_note_crop(uint64_t frame, float u0, float u1, float v0, float v1);
+    extern bool hud_corners_shown_whole(uint64_t frame);
     if (shape < 1.0) {
+        hud_corners_note_crop(frame, 0, 1, (float)((1.0 - shape) / 2), (float)((1.0 + shape) / 2));
+        if (hud_corners_shown_whole(frame)) return;  // (phones and tablets: the HUD in the bars, runtime/hle/hud_corners.c)
         crop[1] = (float)((1.0 - shape) / 2); crop[3] = (float)shape;
         double nh = *vh * shape; *vy += (*vh - nh) / 2; *vh = nh;
         return;
     }
+    double full_vx = *vx, full_vw = *vw;
     static int mode = ROOM_BOX;
     float u0 = 0, u1 = 1;
     static float k0, k1;  // (ROOM_KEEP: the last target)
@@ -339,8 +405,11 @@ void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double
         cu0 = u0, cu1 = u1;
     }
     last = frame;
+    // (phones: the HUD at the screen corners, in the bars: the bars were cleared after the scene, runtime/hle/hud_corners.c)
+    hud_corners_note_crop(frame, cu0, cu1, 0, 1);
     crop[0] = cu0, crop[2] = cu1 - cu0;
     *vx += *vw * cu0, *vw *= cu1 - cu0;
+    if (hud_corners_shown_whole(frame)) crop[0] = 0, crop[2] = 1, *vx = full_vx, *vw = full_vw;
 }
 
 // Current level name for logs ("-" when not in play).

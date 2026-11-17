@@ -11,7 +11,6 @@
 #include "../rando.h"
 #include "../settings.h"
 
-#define MAIN_BASE 0x7000000000ull
 
 // 360-degree movement: main+0xded9f0 (tools/patches.py SNAP_DIR_SITE) turns the stick vector (s1 = x, s2 = y) into
 // one of 8 directions, returned in w0 as an angle (full turn = 2^32, 0 = down, 2^30 = right). With the setting on
@@ -206,7 +205,7 @@ bool rt_no_buff_actor(uint32_t type) {
 // switched P <-> X as the setting changes, live.
 static uint64_t g_tilt_obj;
 static int g_tilt_applied = -1;  // blur removal as last applied (-1: not yet)
-RT_ON_RESET(qol_reset) { g_tilt_obj = 0; g_tilt_applied = -1; }  // (reboot: a new post-process)
+RT_ON_RESET(qol_reset) { g_tilt_obj = 0; g_tilt_applied = -1; }  // (reboot: a new post-process; the focus offset lapses)
 
 void rt_tilt_obj(uint64_t obj) { g_tilt_obj = obj; g_tilt_applied = -1; }
 
@@ -219,8 +218,8 @@ static bool apply_tilt(int removed) {  // false: not set up yet (or not the name
 }
 
 // LARECOMP_SETTING_AT="frame:key=value,..." (test): flip an in-game menu toggle at that presented frame, as the menu
-// would (move_360, blur_removal, dpad_move: 0 / 1; Cosmetics colour rows: a palette name or #RRGGBB - tunic, hearts,
-// hair, shield, skin, leaves, grass, sand; enemy_colours: 0 / 1 / 2; screen_filter: 0-3).
+// would (move_360, blur_removal, frame_interp: 0 / 1; dpad_mode: 0 nothing / 1 items / 2 move; Cosmetics colour rows: a palette name or #RRGGBB - tunic, hearts,
+// hair, shield, skin, leaves, grass, sand; enemy_colours: 0 / 1 / 2; screen_filter: 0-3; text_speed: 0-2).
 static void setting_at_tick(void) {
     static const char *spec;
     static int init;
@@ -239,8 +238,12 @@ static void setting_at_tick(void) {
         int v = atoi(val);
         if (!strcmp(key, "screen_filter")) { g_settings.screen_filter = v; LOG("[qol] test: f%llu %s = %d\n", (unsigned long long)now, key, v); }
         if (!strcmp(key, "enemy_colours")) { g_settings.enemy_colours = v; LOG("[qol] test: f%llu %s = %d\n", (unsigned long long)now, key, v); }
+        if (!strcmp(key, "text_speed") && v >= 0 && v < N_TEXT_SPEEDS) { g_settings.text_speed = v; LOG("[qol] test: f%llu %s = %d\n", (unsigned long long)now, key, v); }
+        if (!strcmp(key, "dpad_mode")) { g_settings.dpad_mode = v; LOG("[qol] test: f%llu %s = %d\n", (unsigned long long)now, key, v); }
+        if (!strcmp(key, "shadows")) { g_settings.shadow_quality = v; LOG("[qol] test: f%llu %s = %d\n", (unsigned long long)now, key, v); }
         bool *b = !strcmp(key, "move_360") ? &g_settings.move_360 : !strcmp(key, "blur_removal") ? &g_settings.blur_removal :
-                  !strcmp(key, "dpad_move") ? &g_settings.dpad_move : NULL;
+                  !strcmp(key, "frame_interp") ? &g_settings.frame_interp :
+                  !strcmp(key, "powerup_music") ? &g_settings.powerup_music : NULL;
         if (b) { *b = v != 0; LOG("[qol] test: f%llu %s = %d\n", (unsigned long long)now, key, v); }
         CosColour *c = !strcmp(key, "tunic") ? &g_settings.tunic : !strcmp(key, "hearts") ? &g_settings.hearts :
                        !strcmp(key, "hair") ? &g_settings.hair : !strcmp(key, "shield") ? &g_settings.shield :
@@ -251,9 +254,36 @@ static void setting_at_tick(void) {
     last = now;
 }
 
+// The tilt-shift's focus distance (the object's +0x40 and +0x80: 26.5 on the Field, the distance from the camera it
+// draws sharp) moved out by this much: local co-op's camera, moved back to zoom out (runtime/hle/coop.c), would
+// otherwise blur Player 1 and keep the band it shows sharp nearer the screen's bottom. The game's own value is kept
+// and the offset added to it each frame; an offset not given again within FOCUS_HOLD frames lapses (play ended, a
+// level change, co-op off: the game's own again).
+#define FOCUS_HOLD 4
+static float g_focus_add;
+static uint64_t g_focus_at;
+void rt_tilt_focus_add(float d) {
+    extern uint64_t renderer_present_count(void);
+    g_focus_add = d, g_focus_at = renderer_present_count();
+}
+static void tilt_focus_tick(void) {
+    extern uint64_t renderer_present_count(void);
+    static float orig[2], wrote[2];
+    static uint64_t obj;
+    if (!g_tilt_obj) return;
+    float add = renderer_present_count() - g_focus_at <= FOCUS_HOLD ? g_focus_add : 0.0f;
+    for (int k = 0; k < 2; k++) {
+        float *f = (float *)(uintptr_t)(g_tilt_obj + (k ? 0x80 : 0x40));
+        if (obj != g_tilt_obj || *f != wrote[k]) orig[k] = *f;  // (the game's own: a new object, or it changed it)
+        *f = wrote[k] = orig[k] + add;
+    }
+    obj = g_tilt_obj;
+}
+
 // Game thread, once per frame (runtime/hle/input.c).
 void qol_tick(void) {
     setting_at_tick();
+    tilt_focus_tick();
     static int env = -1;  // LARECOMP_BLUR_REMOVAL=0/1: test override
     if (env < 0) { const char *e = getenv("LARECOMP_BLUR_REMOVAL"); env = e ? atoi(e) != 0 : 2; }
     int want = env == 2 ? g_settings.blur_removal : env;

@@ -23,6 +23,7 @@ static volatile int g_pending;
 static volatile uint64_t g_request;
 
 static uint64_t g_req;  // our level-jump request (HLE heap)
+static int g_place_queued, g_place_armed;  // (warp_request_place, below)
 static volatile int g_give_pending;
 // A warp waits for the one before it (issue #41: a jump handed to the game while its last one was still under way
 // crashed in its request processor, null+0x3f8): every level load registers a new request object (g_loads); after a
@@ -80,6 +81,7 @@ void warp_request(const char *level, const char *locator) {
     strlcpy(g_level, level, sizeof g_level);
     strlcpy(g_locator, locator, sizeof g_locator);
     g_pending = 1;
+    g_place_queued = g_place_armed = 0;  // (warp_request_place sets it again after this)
     pthread_mutex_unlock(&g_lock);
     LOG("[warp] queued %s / %s\n", level, locator);
 }
@@ -110,6 +112,45 @@ bool warp_blocked(const char *locator) {
     return false;
 }
 int warp_busy(void) { return g_pending; }  // a queued warp not applied yet (shader tour)
+
+// A warp to a room with no arrival point of its own (the Warp tab's dungeon rooms): the jump goes to the nearest
+// arrival point of the level, then, once the level has loaded and settled, Link is moved onto a floor tile just inside
+// the room (the PlayerCollision position doorjump.c moves him by). The game sees him in that room and scrolls there,
+// as after a door jump.
+enum { PLACE_DELAY = 40, PLACE_TIMEOUT = 1500 };
+static int player_component_missing(void);
+static unsigned g_place_loads;
+static uint64_t g_place_since;
+static float g_place_pos[3];
+static char g_place_level[64];
+void warp_request_place(const char *level, const char *locator, float x, float y, float z) {
+    warp_request(level, locator);
+    pthread_mutex_lock(&g_lock);
+    g_place_queued = 1, g_place_armed = 0;
+    g_place_pos[0] = x, g_place_pos[1] = y, g_place_pos[2] = z;
+    strlcpy(g_place_level, level, sizeof g_place_level);
+    pthread_mutex_unlock(&g_lock);
+    LOG("[warp] then Link -> (%.2f, %.2f, %.2f)\n", x, y, z);
+}
+static void place_tick(uint64_t now) {
+    if (!g_place_armed) return;
+    if (now - g_place_since > PLACE_TIMEOUT) { g_place_armed = 0; LOG("[warp] room placement dropped (timeout)\n"); return; }
+    if (g_loads == g_place_loads || now - g_load_frame < PLACE_DELAY || g_change || player_component_missing()) return;
+    uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
+    if (!ps || strncmp((const char *)(uintptr_t)ps, g_place_level, sizeof g_place_level)) return;
+    extern void doorjump_player_rescan(void);
+    extern uint64_t doorjump_player(uint64_t frame);
+    static unsigned rescanned = ~0u;
+    if (rescanned != g_loads) rescanned = g_loads, doorjump_player_rescan();  // (a warp within the same level)
+    uint64_t pc = doorjump_player(now);
+    if (!pc) return;
+    float *pos = (float *)(uintptr_t)(pc + 0x80), *pos2 = (float *)(uintptr_t)(pc + 0xb0);
+    pos[0] = pos2[0] = g_place_pos[0];
+    pos[1] = pos2[1] = g_place_pos[1];
+    pos[2] = pos2[2] = g_place_pos[2];
+    g_place_armed = 0;
+    LOG("[warp] Link placed at (%.2f, %.2f, %.2f) in %s\n", g_place_pos[0], g_place_pos[1], g_place_pos[2], g_place_level);
+}
 
 // LARECOMP_WARP_AT=<frame>:<level>:<locator>[,<frame>:<level>:<locator>...]  (test hook)
 // LARECOMP_WARP_ON_LOAD=<level>:<locator>: warp once, ~1 s after a save is loaded (hand-off to the user)
@@ -259,14 +300,16 @@ static int player_component_missing(void) {
     return !o || !LD64(o + 0x618);
 }
 
-/* A1 runtime-only readiness gate. Reuse the existing level request watcher,
- * player-component check and load settle interval; no new guest hooks. This is
- * a conservative readiness heuristic, not a new engine load-complete signal. */
+bool laonline_configured(void);  // runtime/hle/laonline.c: online play set up (laonline.ini / LAONLINE_MODE)
+
+// Online play (runtime/hle/laonline.c): the level is ready for remote players' Links - in play, no level change of
+// the game's own or a warp pending, the player component there, and WARP_SETTLE frames since the last load, as a warp
+// waits for.
 int laonline_level_ready(void) {
     watch_level_change(g_frame_now);
     return game_in_play() && !g_change && !g_pending &&
-        !(g_warp_waiting && g_loads == g_loads_at_warp && g_frame_now - g_warp_frame < WARP_TIMEOUT) &&
-        !player_component_missing() && g_frame_now - g_load_frame >= WARP_SETTLE;
+           !(g_warp_waiting && g_loads == g_loads_at_warp && g_frame_now - g_warp_frame < WARP_TIMEOUT) &&
+           !player_component_missing() && g_frame_now - g_load_frame >= WARP_SETTLE;
 }
 
 // Game main thread, once per frame (from the controller read): if a warp is queued, build a request with
@@ -274,6 +317,7 @@ int laonline_level_ready(void) {
 void warp_game_tick(Cpu *c) {
     uint64_t now = g_frame_now;
     watch_level_change(now);
+    place_tick(now);
     if (!g_pending) return;
     if (g_warp_waiting && g_loads == g_loads_at_warp && now - g_warp_frame < WARP_TIMEOUT)
         return;  // (the last warp's level isn't loaded yet: this one stays queued)
@@ -305,6 +349,7 @@ void warp_game_tick(Cpu *c) {
     pthread_mutex_unlock(&g_lock);
     LOG("[warp] jumping to %s / %s\n", (char *)(uintptr_t)(req + 0xa8), (char *)(uintptr_t)(req + 0xf0));
     g_warp_waiting = 1, g_loads_at_warp = g_loads, g_warp_frame = now;
+    if (g_place_queued) g_place_queued = 0, g_place_armed = 1, g_place_loads = g_loads, g_place_since = now;
     uint64_t saved[31], sp = c->sp, pc = c->pc;
     memcpy(saved, c->x, sizeof saved);
     c->x[0] = req;
@@ -741,24 +786,33 @@ static void actor_scan_tick(uint64_t frame) {
 void give_item_tick(Cpu *c, uint64_t frame) {
     actor_scan_tick(frame);
     { extern void miniboss_tick(Cpu *, uint64_t); miniboss_tick(c, frame); }
-    { extern void laonline_ui_tick(uint64_t); laonline_ui_tick(frame); } // Read-only UI state, no actor writes.
-    { extern void laonline_tick(Cpu *, uint64_t); laonline_tick(c, frame); }  // (LA-Online: runtime/hle/laonline.c, off unless enabled)
-    { extern void ztarget_tick(Cpu *, uint64_t); ztarget_tick(c, frame); }  // (V15 Z-targeting, online and offline: runtime/hle/ztarget.c)
-    { extern void laonline_coop_tick(Cpu *,uint64_t); laonline_coop_tick(c,frame); }
+    if (laonline_configured()) {  // online play (laonline.ini / LAONLINE_MODE sets a mode): its UI state, the remote
+                                  // players' Links, Z-targeting, the team's pickups (runtime/hle/laonline*.c, ztarget.c)
+        extern void laonline_ui_tick(uint64_t), laonline_tick(Cpu *, uint64_t), ztarget_tick(Cpu *, uint64_t),
+            laonline_coop_tick(Cpu *, uint64_t), laonline_local_tick(Cpu *, uint64_t);
+        laonline_ui_tick(frame);
+        laonline_tick(c, frame);
+        ztarget_tick(c, frame);
+        laonline_coop_tick(c, frame);
+        laonline_local_tick(c, frame);  // (this PC's other local co-op players on the relay too: laonline_local.c)
+    }
     { extern void escape_tick(Cpu *, uint64_t); escape_tick(c, frame); }
     { extern void hint_sheet_tick(Cpu *, uint64_t); hint_sheet_tick(c, frame); }  // (runtime/hle/hint_sheet.c)
     { extern void rescue_tick(uint64_t); rescue_tick(frame); }  // (softlock rescues: runtime/hle/rescue.c)
     pane_scan_tick(frame);
     { extern void doorjump_tick(uint64_t frame); doorjump_tick(frame); }
+    { extern void weather_player_tick(Cpu *, uint64_t frame); weather_player_tick(c, frame); }  // (after doorjump: Link found)
     { extern void pot_regrow_tick(uint64_t frame); pot_regrow_tick(frame); }  // (after doorjump: Link found)
     { extern void souls_tick(uint64_t frame); souls_tick(frame); }  // (boss / mini-boss souls: runtime/hle/souls.c)
     { extern void triforce_tick(void); triforce_tick(); }  // (Triforce hunt: the get message's flags, triforce.c)
     { extern void hookshot_tour_tick(uint64_t frame); hookshot_tour_tick(frame); }
     { extern void flags_ext_tick(void); flags_ext_tick(); }  // (game thread: flag gets / sets happen here too)
-    { extern void lao_dev_tick(uint64_t); lao_dev_tick(frame); }
+    if (laonline_configured()) {  // (online play's save-structure journal, after it)
+        extern void lao_dev_tick(uint64_t);
+        lao_dev_tick(frame);
+    }
     { extern void enemy_stairs_tick(void); enemy_stairs_tick(); }  // (after it: Armos stairs flags, enemy_random.c)
     { extern void rt_powder_flag_tick(void); rt_powder_flag_tick(); }  // (found powder: keysanity.c)
-    { extern void dpad_ocarina_song_tick(uint64_t); dpad_ocarina_song_tick(frame); }  // (V13.5: a known song is always selected)
     { extern void silent_pickups_tick(uint64_t); silent_pickups_tick(frame); }  // (a silent Heart Container's refill)
     ptrscan_tick(frame);
     memdump_tick(frame);

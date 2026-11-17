@@ -18,9 +18,10 @@
 #include "../hle.h"
 #include "../rando.h"
 #include "../ipc.h"
-#include "../game_addresses.h"
 #include "../platform.h"
+#include "../game_addresses.h"
 #include "../romfs_build.h"
+#include "../ui/menu.h"
 
 #define FS_PATH_NOT_FOUND MAKE_RESULT(2, 1)
 #define FS_PATH_EXISTS MAKE_RESULT(2, 2)
@@ -128,7 +129,7 @@ static void base_open(void) {
 // ------------------------------------------------------------------ RomFS file index (offset -> path)
 typedef struct { uint64_t start, size; char *path; bool warned; const uint8_t *mem; } Overlay;
 // in-image patches (copies of RomFS tables with changes): header, dir meta, file hash, file meta
-typedef struct { uint64_t off, size; uint8_t *data; } Patch;
+typedef struct { uint64_t off, size; uint8_t *data; int (*on)(void); } Patch;  // (on: applied while it says so)
 static Patch patches[8];
 static int npatches;
 static Overlay *ov;
@@ -430,8 +431,21 @@ static void rom_index(void) {
     }
     if (ov_n) LOG("[fs] randomizer: %d romfs files replaced\n", ov_n);
     if (ov_meta) { patches[npatches++] = (Patch){ov_meta_off, ov_meta_size, ov_meta}; }
-    // The game's own files (before a seed's added files; the crash dialog checks them), their sizes summed, and the
-    // files that aren't the game's named. Copies of the game code at the root (game_romfs_exefs_copy) are left out.
+    {   // a few bytes of the game's own files changed (local co-op only, while it's on: runtime/hle/coop.c)
+        extern bool coop_romfs_patch(const char *path, uint64_t off, uint64_t size,
+                                     ssize_t (*rd)(void *, uint64_t, uint64_t), uint64_t *at, uint32_t *val);
+        extern int rt_coop_on(void);
+        for (int i = 0; i < rom_nfiles && npatches < (int)(sizeof patches / sizeof *patches) - 3; i++) {
+            uint64_t at;
+            uint32_t val;
+            if (!coop_romfs_patch(rom_files[i].path, rom_files[i].off, rom_files[i].size, base_pread, &at, &val)) continue;
+            uint8_t *d = malloc(4);
+            memcpy(d, &val, 4);
+            patches[npatches++] = (Patch){at, 4, d, rt_coop_on};
+        }
+    }
+    // The game's own files (before a seed's added files; the crash dialog checks them), their sizes summed (the files
+    // that aren't the game's left out: issue #553), and the files that aren't the game's named. Copies of the game code at the root (game_romfs_exefs_copy) are left out.
     char game_dir[1100] = "";
     size_t dl = g_romfs_dir ? strlen(g_romfs_dir) : 0;
     if (dl > 6 && dl - 6 < sizeof game_dir && !strcmp(g_romfs_dir + dl - 6, "/romfs"))
@@ -441,8 +455,8 @@ static void rom_index(void) {
     rt_romfs_bytes = 0;
     for (int i = 0; i < rom_nfiles; i++) {
         if (game_dir[0] && game_romfs_exefs_copy(game_dir, rom_files[i].path, rom_files[i].size)) { copies++; continue; }
-        rt_romfs_bytes += rom_files[i].size;  // (the game's sizes, not a seed's)
-        if (!game_romfs_check_file(check, rom_files[i].path, rom_files[i].size) && odd++ < 20)
+        // (the game's sizes, not a seed's)
+        if (!game_romfs_check_file(check, rom_files[i].path, rom_files[i].size, &rt_romfs_bytes) && odd++ < 20)
             LOG("[fs] romfs: not one of the game's files: %s (%llu bytes)\n", rom_files[i].path,
                 (unsigned long long)rom_files[i].size);
     }
@@ -463,13 +477,14 @@ static void rom_index(void) {
     LOG("[fs] romfs index: %d files\n", rom_nfiles);
 }
 
-// Virtual RomFS image read: original bytes, with the patched file table and appended replacement files.
+// Virtual RomFS image read: original bytes, with the patched file table (and co-op's few bytes) and appended
+// replacement files.
 static ssize_t romfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
-    if (!ov_n) return base_pread(dst, size, off);
+    if (!ov_n && !npatches) return base_pread(dst, size, off);
     uint64_t done = 0;
     while (done < size) {
         uint64_t o = off + done, n = size - done;
-        if (o >= ov[0].start) {  // appended region
+        if (ov_n && o >= ov[0].start) {  // appended region
             int i = 0;
             while (i < ov_n && !(o >= ov[i].start && o < ov[i].start + ((ov[i].size + 0xF) & ~0xFull))) i++;
             if (i == ov_n) { memset(dst + done, 0, n); done += n; break; }
@@ -501,7 +516,7 @@ static ssize_t romfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
             if (r < 0) r = 0;
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);
         } else {
-            if (o + n > ov[0].start) n = ov[0].start - o;
+            if (ov_n && o + n > ov[0].start) n = ov[0].start - o;
             ssize_t r = base_pread(dst + done, n, o);
             if (r < 0) r = 0;
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);
@@ -509,7 +524,8 @@ static ssize_t romfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
             for (int k = 0; k < npatches; k++) {
                 uint64_t a = o > patches[k].off ? o : patches[k].off;
                 uint64_t b = o + n < patches[k].off + patches[k].size ? o + n : patches[k].off + patches[k].size;
-                if (a < b) memcpy(dst + done + (a - o), patches[k].data + (a - patches[k].off), b - a);
+                if (a < b && (!patches[k].on || patches[k].on()))
+                    memcpy(dst + done + (a - o), patches[k].data + (a - patches[k].off), b - a);
             }
         }
         done += n;
@@ -618,10 +634,7 @@ static void save_failed(HostFs *fs, const char *what, const char *path, int erro
     static bool told;
     if (told) return;
     told = true;
-    char text[1400];
-    snprintf(text, sizeof text, "Your game could not be saved (the game may still say it was). Your previous save "
-             "is unchanged.\n\nMake sure this folder can be written to and the disk has free space:\n%s", fs->root);
-    plat_notice(text);
+    menu_save_failed(fs->root);  // (the menu's notice, in its look)
 }
 
 static void sync_dir_of(const char *path) {
@@ -751,20 +764,25 @@ static void drop_slot(const char *path) {
     unlink(pending);
     unlink(flags_pending);
 }
+// The frame of the last save: the game's "Now saving." note shows for about a second from it (local co-op's hearts
+// in that corner move above it then: runtime/ui/coop_hud.mm).
+uint64_t g_save_frame;
 // Commit always succeeds for the game (see save_failed). A save that failed is dropped whole. If only the sidecar's
 // rename failed (the data is already replaced), its working copy stays for the next mount to finish the pair.
 static void commit(HostFs *fs) {
     extern void pace_hitch(const char *why);  // nvn/pace.c
-    if (fs->npending) pace_hitch("a save commit");
+    extern uint64_t renderer_present_count(void);
+    if (fs->npending) pace_hitch("a save commit"), g_save_frame = renderer_present_count();
+    extern void lao_dev_save(const char *path, int committed);  // (online play's save journal: laonline_dev_events.c)
     for (int i = 0; i < fs->npending; i++) {
         const char *path = fs->pending[i];
+        bool committed = !fs->failed[i] && commit_slot(path);
+        int error = errno;  // (commit_slot's, before anything else can change it)
+        { extern bool laonline_configured(void); if (laonline_configured()) lao_dev_save(path, committed); }
         if (fs->failed[i]) {
             drop_slot(path);
-            {extern void lao_dev_save(const char *,int);lao_dev_save(path,0);}
             save_failed(fs, "dropped the failed save", path, 0);
-        } else if (!commit_slot(path)) {
-            int error = errno;
-            {extern void lao_dev_save(const char *,int);lao_dev_save(path,0);}
+        } else if (!committed) {
             char pending[1200];
             struct stat st;
             snprintf(pending, sizeof pending, "%s.pending", path);
@@ -773,7 +791,7 @@ static void commit(HostFs *fs) {
                 save_failed(fs, "could not commit", path, error);
             } else LOG("[save] committed %s, but not its flags sidecar yet (%s): the next mount finishes it\n", path,
                        strerror(error));
-        } else {LOG("[save] committed %s\n", path);extern void lao_dev_save(const char *,int);lao_dev_save(path,1); }
+        } else LOG("[save] committed %s\n", path);
     }
     fs->npending = 0;
 }
@@ -864,6 +882,10 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
             save_editor_file_read(f->path, b->addr, off, n);
             extern void flags_ext_save_read(const char *path, uint64_t addr, int64_t off, int64_t size);
             flags_ext_save_read(f->path, b->addr, off, n);
+            extern void dpad_items_save_read(const char *path, uint64_t addr, int64_t off, int64_t size);
+            dpad_items_save_read(f->path, b->addr, off, n);  // (runtime/hle/dpad_items.c)
+            extern void weather_cycle_save_read(const char *path, uint64_t addr, int64_t off, int64_t size);
+            weather_cycle_save_read(f->path, b->addr, off, n);  // (runtime/nvn/weather_cycle.c)
         }
         OUT(int64_t, 0) = n < 0 ? 0 : n;
         resp_size(resp, 8);
@@ -886,6 +908,10 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
             extern bool flags_ext_save_written(const char *path, uint64_t addr, int64_t off, int64_t size);
             errno = 0;
             if (!flags_ext_save_written(f->path, a->addr, off, size)) error = errno ? errno : EIO;
+            extern void weather_cycle_save_written(const char *path, uint64_t addr, int64_t off, int64_t size);
+            if (!error) weather_cycle_save_written(f->path, a->addr, off, size);  // (runtime/nvn/weather_cycle.c)
+            extern void dpad_items_save_written(const char *path, uint64_t addr, int64_t off, int64_t size);
+            if (!error) dpad_items_save_written(f->path, a->addr, off, size);  // (runtime/hle/dpad_items.c)
         }
         if (error && f->fs) file_failed(f, "write", error);
         else if (error) { errno = error; resp->result = errno_result(); }

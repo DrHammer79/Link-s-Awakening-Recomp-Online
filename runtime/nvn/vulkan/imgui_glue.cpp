@@ -1,27 +1,64 @@
 // Dear ImGui's Vulkan backend on our device (start screen and in-game menu; both draw inside the window image's
 // dynamic rendering begun by vk_frame_begin).
 #include "imgui.h"
+#include "imgui_impl_vulkan.h"
 #include <map>
 #include <vector>
-#include "imgui_impl_vulkan.h"
 
 extern "C" {
 #include "vk.h"
 #include "record.h"
 }
 
-struct UiTextureResource {VkImage image;VmaAllocation memory;VkImageView view;};
-struct UiBackendLifetime {uint64_t generation=0;std::vector<UiTextureResource> textures;};
-static std::map<ImGuiContext*,UiBackendLifetime> ui_lifetimes;
-static uint64_t ui_generation;
-extern "C" uint64_t vk_imgui_texture_generation(void){auto it=ui_lifetimes.find(ImGui::GetCurrentContext());return it==ui_lifetimes.end()?0:it->second.generation;}
+// Per ImGui context: the static images made for it (vk_imgui_texture_rgba), freed with its backend, and its backend's
+// generation - a new one each time the backend starts for that context, so code keeping a texture id made for it
+// (an overlay's icons, say) knows to make it again (vk_imgui_texture_generation).
+struct UiImage { VkImage image; VmaAllocation memory; VkImageView view; };
+struct UiContextImages { uint64_t generation = 0; std::vector<UiImage> images; };
+static std::map<ImGuiContext *, UiContextImages> g_ui_images;
+static uint64_t g_ui_generation;
+extern "C" uint64_t vk_imgui_texture_generation(void) {
+    auto it = g_ui_images.find(ImGui::GetCurrentContext());
+    return it == g_ui_images.end() ? 0 : it->second.generation;
+}
+
 // imgui_impl_vulkan.cpp: fixed vertex input draws nothing on this driver while dynamic vertex input is enabled.
 extern "C" int las_imgui_dyn_vertex = 0;
+
+#ifdef __ANDROID__
+// The backend's vertex shader with the swapchain's pre-rotation (device.c sc_quarter) in its push constants: the same
+// projection as the stock shader, then turned by (cos, sin). From Nycolazs's LASRecomp-Android-Plus (MIT).
+static const char kImguiVert[] =
+    "#version 450 core\n"
+    "layout(location = 0) in vec2 aPos;\n"
+    "layout(location = 1) in vec2 aUV;\n"
+    "layout(location = 2) in vec4 aColor;\n"
+    "layout(push_constant) uniform uPushConstant { vec2 uScale; vec2 uTranslate; vec2 uRot; } pc;\n"
+    "out gl_PerVertex { vec4 gl_Position; };\n"
+    "layout(location = 0) out struct { vec4 Color; vec2 UV; } Out;\n"
+    "void main() {\n"
+    "  Out.Color = aColor;\n"
+    "  Out.UV = aUV;\n"
+    "  vec2 p = aPos * pc.uScale + pc.uTranslate;\n"
+    "  gl_Position = vec4(pc.uRot.x * p.x - pc.uRot.y * p.y, pc.uRot.y * p.x + pc.uRot.x * p.y, 0.0, 1.0);\n"
+    "}\n";
+extern "C" uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t *nwords);  // (shaders.c)
+#endif
+
+// (device.c, each window frame) the swapchain's pre-rotation for everything ImGui draws into it
+extern "C" void vk_imgui_prerotation(int quarter) { ImGui_ImplVulkan_SetPreRotation(quarter); }
 
 // Per ImGui context (the start screen and the in-game menu each have one, and the start screen comes back after an
 // in-place reboot while the menu's context lives on): the backend keeps its data in the current context.
 extern "C" bool vk_imgui_backend_init(void) {
     if (ImGui::GetIO().BackendRendererUserData) return true;
+#ifdef __ANDROID__
+    static uint32_t *spv;
+    static size_t nwords;
+    if (!spv) spv = vk_glsl_to_spirv(kImguiVert, STAGE_VERTEX, "imgui.vert", &nwords);
+    if (spv) ImGui_ImplVulkan_SetVertexShader(spv, nwords * 4);
+    else LOG("[vk] ImGui: the pre-rotation vertex shader didn't compile: the stock one\n");
+#endif
     las_imgui_dyn_vertex = g_vk.vids;
     ImGui_ImplVulkan_InitInfo ii = {};
     ii.ApiVersion = VK_API_VERSION_1_3;
@@ -30,7 +67,7 @@ extern "C" bool vk_imgui_backend_init(void) {
     ii.Device = g_vk.dev;
     ii.QueueFamily = g_vk.qfam;
     ii.Queue = g_vk.queue;
-    ii.DescriptorPoolSize = 256;
+    ii.DescriptorPoolSize = 256;  // (one per texture: the fonts, the start screen's images, overlays' icons and images)
     ii.MinImageCount = 2;
     ii.ImageCount = (g_vk.sc_count > 3 ? g_vk.sc_count : 3) + 1;  // vertex buffers rotate per image: cover frames in flight
     ii.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
@@ -45,19 +82,35 @@ extern "C" bool vk_imgui_backend_init(void) {
     // its own, which its NewFrame would otherwise make at the first frame, while the recorder thread (record.c) may
     // be submitting. Here the recorder is drained first, so the queue is idle.
     if (ok) {
-        ui_lifetimes[ImGui::GetCurrentContext()].generation=++ui_generation;
+        g_ui_images[ImGui::GetCurrentContext()].generation = ++g_ui_generation;
         rec_drain();
         ImGui_ImplVulkan_CreateFontsTexture();
     }
     return ok;
 }
 
+// The fonts were added again (the menus' language changed, runtime/ui/i18n.mm): a new font texture, with the queue
+// idle as above (the old one may still be in a frame in flight)
+extern "C" void vk_imgui_fonts_rebuild(void) {
+    if (!ImGui::GetIO().BackendRendererUserData) return;
+    rec_drain();
+    vkDeviceWaitIdle(g_vk.dev);
+    ImGui_ImplVulkan_DestroyFontsTexture();
+    ImGui_ImplVulkan_CreateFontsTexture();
+}
+
 extern "C" void vk_imgui_backend_shutdown(void) {
     if (!ImGui::GetIO().BackendRendererUserData) return;
     rec_drain();  // (the queue is the recorder's: idle for the wait below)
     vkDeviceWaitIdle(g_vk.dev);
-    auto it=ui_lifetimes.find(ImGui::GetCurrentContext());
-    if(it!=ui_lifetimes.end()){for(const auto &texture:it->second.textures){vkDestroyImageView(g_vk.dev,texture.view,NULL);vmaDestroyImage(g_vk.vma,texture.image,texture.memory);}ui_lifetimes.erase(it);}
+    auto it = g_ui_images.find(ImGui::GetCurrentContext());
+    if (it != g_ui_images.end()) {  // (the queue is idle: no frame in flight still samples them)
+        for (const UiImage &u : it->second.images) {
+            vkDestroyImageView(g_vk.dev, u.view, NULL);
+            vmaDestroyImage(g_vk.vma, u.image, u.memory);
+        }
+        g_ui_images.erase(it);
+    }
     ImGui_ImplVulkan_Shutdown();
 }
 
@@ -91,7 +144,10 @@ extern "C" uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h) {
     vi.format = VK_FORMAT_R8G8B8A8_UNORM;
     vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     VkImageView view;
-    if (vkCreateImageView(g_vk.dev, &vi, NULL, &view) != VK_SUCCESS) return 0;
-    ui_lifetimes[ImGui::GetCurrentContext()].textures.push_back({img,mem,view});
+    if (vkCreateImageView(g_vk.dev, &vi, NULL, &view) != VK_SUCCESS) {
+        vmaDestroyImage(g_vk.vma, img, mem);
+        return 0;
+    }
+    g_ui_images[ImGui::GetCurrentContext()].images.push_back({img, mem, view});
     return (uint64_t)ImGui_ImplVulkan_AddTexture(vk_default_sampler(true), view, VK_IMAGE_LAYOUT_GENERAL);
 }

@@ -96,7 +96,7 @@ static int global_mode(void) { return laonline_launch_choice() == 3; }
 static int pvp_mode(void) { int m = laonline_launch_choice(); return m == 1 || m == 2 || m == 3; }
 static uint64_t ms_now(void) { return plat_now_ns() / 1000000ull; }
 static int save_ready(void) {
-    if (!g_ga || !game_version() || strcmp(game_version()->key, "v1_0_0") || !game_in_play()) return 0;
+    if (!g_ga || !game_version() || !game_in_play()) return 0;
     return LD32(SAVE) == 0xe;  /* (the loaded-save marker laonline_coop.c checks) */
 }
 
@@ -577,14 +577,32 @@ void laonline_v12_message(const uint8_t *b, size_t n) {
 
 /* ------------------------------------------------------------------ shared consumables (game thread) */
 static struct { uint32_t before, expected; int tries; uint64_t frame; } rupee_check;
-static int ammo_cap(int up_bit, int base) { return ((LD8(SAVE + UPGRADES) >> up_bit) & 1) ? base * 2 : base; }
-static int add_ammo(uint32_t off, int item_bit, int up_bit, int base, int count) {
-    if (!((LD32(SAVE + ITEMS) >> item_bit) & 1)) return 0;
-    int cap = ammo_cap(up_bit, base), have = LD8(SAVE + off), next = have + count;
-    if (next > cap) next = cap;
-    if (next != have) ST8(SAVE + off, (uint8_t)next);
-    return next - have;
+/* LAS Recomp Co-Op's port (LAS Recomp's review: no direct save writes): what the team shares is granted through the
+ * game's own AddItem (ADD_ITEM, main+0x7e18b0 on 1.0.1: item, count, index, auto-equip), which sets the item's bits
+ * and counts as the game does - the bag's or quiver's size (bombs past it are clipped), its "got" bit (+0x55E4) -
+ * instead of writing the save. Checked item by item on 1.0.1 (LARECOMP_GIVE_ITEM, the save before and after):
+ * k_item_bit_id below, the capacity upgrades 123 / 124 / 125 (+0x555C bits 3 / 4 / 5), the Seashell Sensor 116,
+ * golden leaf 23 (index: the leaf, its bit), the trade steps (trade_item), the levels 13 / 14, 2 / 3, 0 / 1 (Power
+ * Bracelet, shield, sword: Lv1 its ITEMS bit, Lv2 its UPGRADES bit), rupees (Rupee1 .. Rupee300: one call adds the
+ * item's value once, whatever the count). A teammate's grant: laonline_coop_remote_grant keeps it from being reported
+ * back to the team as this player's pickup (laonline_coop.c), the journal marks it REMOTE. Game thread. */
+static void native_grant(struct Cpu *c, int item, int count, int index) {
+    extern void laonline_coop_remote_grant(int);
+    extern void lao_dev_remote(int);
+    struct Cpu saved = *c;
+    c->x[0] = (uint64_t)item, c->x[1] = (uint64_t)count, c->x[2] = (uint64_t)(int64_t)index, c->x[3] = 0;
+    laonline_coop_remote_grant(1), lao_dev_remote(1);
+    guest_call(c, GA(ADD_ITEM));
+    lao_dev_remote(0), laonline_coop_remote_grant(0);
+    *c = saved;
+    LOG("[laonline] team grant: item %d x%d (index %d)\n", item, count, index);
 }
+/* ITEMS bit -> its item (-1: not mirrored here: sword / shield, the verified reward sync). Bits 13 to 15 are the three
+ * bottles (item 113, index 0 to 2). Bit 10 is the Power Bracelet Lv1. */
+static const int8_t k_item_bit_id[16] = {-1, -1, 4, 5, 6, 7, 8, 9, 11, 12, 13, 15, 16, 113, 113, 113};
+/* the trade byte's step -> its item: 1 to 12 are items 29 to 40 (Yoshi Doll .. Necklace), 13 / 14 items 42 / 43
+ * (Mermaid's Scale, Magnifying Lens) - as the game's own Inventory.SetWarashibeItem gives them (main+0x7e2a10) */
+static int trade_item(int t) { return t >= 1 && t <= 12 ? 28 + t : t == 13 ? 42 : t == 14 ? 43 : -1; }
 /* V13: a sword / shield / bracelet (either level) picked up here, at this map / room (laonline_coop.c, local AddItem) */
 void laonline_v12_progressive_found(int item, uint16_t map, uint16_t room) {
     int f = prog_family(item);
@@ -596,23 +614,29 @@ void laonline_v12_progressive_found(int item, uint16_t map, uint16_t room) {
     dev_events_emit("ITEM", "V13_PROGRESSIVE_PLACE", k_prog[f].name, i, map, room, 1, "LOCAL", "LOCAL", 0);
 }
 void laonline_v12_bracelet_found(uint16_t map, uint16_t room) { laonline_v12_progressive_found(13, map, room); }
-int laonline_v12_resource(int item, int count) {
+int laonline_v12_resource(struct Cpu *c, int item, int count) {
     cfg_load();
     if (!cfg_consumables || !coop_mode() || !save_ready() || count < 1 || count > 999) return 0;
     int value = 0;
     switch (item) {
     case 101: value = 1; break;  case 102: value = 5; break;   case 104: value = 20; break;
     case 105: value = 50; break; case 106: value = 100; break; case 108: value = 300; break;
-    case 4: { int got = add_ammo(BOMBS, 2, 4, 30, count);
-        dev_events_emit("ITEM", "V12_SHARED_BOMBS", "Bombs", item, count, 0, got, got ? "APPLIED" : "FULL_OR_NO_BAG", "REMOTE", 0); return 1; }
-    case 60: { int got = add_ammo(ARROWS, 3, 5, 30, count);
-        dev_events_emit("ITEM", "V12_SHARED_ARROWS", "Arrows", item, count, 0, got, got ? "APPLIED" : "FULL_OR_NO_BOW", "REMOTE", 0); return 1; }
-    case 11: { int got = add_ammo(POWDER, 8, 3, 20, count);
-        dev_events_emit("ITEM", "V12_SHARED_POWDER", "Magic Powder", item, count, 0, got, got ? "APPLIED" : "FULL_OR_NONE", "REMOTE", 0); return 1; }
+    case 4: case 60: case 11: {  /* (the bag / bow / powder already held: laonline_coop.c checks it first) */
+        uint32_t off = item == 4 ? BOMBS : item == 60 ? ARROWS : POWDER;
+        int had = LD8(SAVE + off);
+        native_grant(c, item, count, -1);
+        int got = LD8(SAVE + off) - had;
+        dev_events_emit("ITEM", item == 4 ? "V12_SHARED_BOMBS" : item == 60 ? "V12_SHARED_ARROWS" : "V12_SHARED_POWDER",
+                        item == 4 ? "Bombs" : item == 60 ? "Arrows" : "Magic Powder", item, count, had, had + got,
+                        got ? "NATIVE_ADD_ITEM" : "FULL", "REMOTE", 0);
+        return 1;
+    }
     default: return 0;
     }
-    /* Rupees: the native AddItem from this hook is undone by the game a frame later (dev-events-log: 231 -> 236 ->
-     * 231 for every remote Rupee). The wallet is written the way the save editor does; the next ticks check it. */
+    /* Rupees through AddItem as well, one call per rupee item (the count isn't the game's for rupees). His V12 wrote
+     * the wallet because "the native AddItem from this hook is undone by the game a frame later (231 -> 236 -> 231)";
+     * an AddItem from this same game-thread tick stayed on 1.0.1 (LARECOMP_GIVE_ITEM: 100 -> 156, kept 5 s). The next
+     * ticks still check it (rupee_tick) and log a revert, without writing the wallet again. */
     uint32_t before = LD32(SAVE + RUPEES), next = before + (uint32_t)(value * count);
     if (next > 9999) next = 9999;
     if (next == before) {  /* V13: wallet already full. V12 logged every one of these as a "native revert" and rewrote
@@ -623,19 +647,17 @@ int laonline_v12_resource(int item, int count) {
             dev_events_emit("ITEM", "V13_SHARED_RUPEES_WALLET_FULL", "Rupees", item, count, before, before, "NOTHING_TO_ADD", "REMOTE", 0); }
         return 1;
     }
-    ST32(SAVE + RUPEES, next);
+    for (int i = 0; i < count; i++) native_grant(c, item, 1, -1);
+    next = LD32(SAVE + RUPEES);
     rupee_check.before = before; rupee_check.expected = next; rupee_check.tries = 0; rupee_check.frame = renderer_present_count();
-    dev_events_emit("ITEM", "V12_SHARED_RUPEES", "Rupees", item, count, before, next, "WRITTEN_VERIFY_PENDING", "REMOTE", 0);
+    dev_events_emit("ITEM", "V12_SHARED_RUPEES", "Rupees", item, count, before, next, "NATIVE_ADD_ITEM_VERIFY_PENDING", "REMOTE", 0);
     return 1;
 }
 static void rupee_tick(uint64_t frame) {
     if (!rupee_check.expected || frame < rupee_check.frame + 2) return;
     uint32_t now = LD32(SAVE + RUPEES);
-    if (now == rupee_check.before && rupee_check.tries < 3) {  /* put back by the game: once more */
-        ST32(SAVE + RUPEES, rupee_check.expected); rupee_check.tries++; rupee_check.frame = frame;
-        dev_events_emit("ITEM", "V12_SHARED_RUPEES_REAPPLIED", "Rupees", 0, rupee_check.tries, rupee_check.before, rupee_check.expected, "REVERT_DETECTED", "REMOTE", 0);
-        return;
-    }
+    if (now == rupee_check.before)  /* (put back by the game: logged, not written again - its cause is the thing to find) */
+        LOG("[laonline] shared rupees undone: %u -> %u -> %u\n", rupee_check.before, rupee_check.expected, now);
     dev_events_emit("ITEM", now == rupee_check.before ? "V12_SHARED_RUPEES_FAILED" : "V12_SHARED_RUPEES_VERIFIED", "Rupees", 0,
                     rupee_check.tries, rupee_check.before, now, now == rupee_check.before ? "NATIVE_REVERT" : "WALLET_READBACK", "REMOTE", 0);
     rupee_check.expected = 0;
@@ -672,7 +694,7 @@ static void hold_note(int f) {
     LOG("[laonline] V15.1 shared flag %d is for the room you are in (%s) - applied when you leave it\n", f, cur_room);
     dev_events_emit("STORY_FLAG", "V151_FLAG_HELD_IN_ROOM", "Shared flag waits until you leave the room", f, 0, 0, 0, "HELD", "REMOTE", 0);
 }
-static void progress_tick(uint64_t frame) {
+static void progress_tick(struct Cpu *c, uint64_t frame) {
     if (!coop_mode() || !save_ready() || !laonline_level_ready() || laonline_ui_paused() || !laonline_coop_world_ready()) return;
     if (frame - last_scan < 20) return;
     last_scan = frame;
@@ -708,23 +730,25 @@ static void progress_tick(uint64_t frame) {
         for (int bit = 0; bit < 16; bit++) if (((ITEM_MIRROR_BITS >> bit) & 1) && iin[K_ITEMS + bit - K_ITEMS] > 0) want |= 1u << bit;
         if (want != items) {
             uint32_t added = want & ~items;
-            ST32(SAVE + ITEMS, want);
-            if ((added & (1u << 2)) && !LD8(SAVE + BOMBS)) ST8(SAVE + BOMBS, 10);
-            if ((added & (1u << 3)) && !LD8(SAVE + ARROWS)) ST8(SAVE + ARROWS, 10);
-            if ((added & (1u << 8)) && !LD8(SAVE + POWDER)) ST8(SAVE + POWDER, 10);
-            dev_events_emit("ITEM", "V12_ITEMS_SHARED", "Equipment bits", 0, 0, items, LD32(SAVE + ITEMS), "SAVE_WRITE_READBACK", "REMOTE", 0);
+            for (int bit = 2; bit < 16; bit++)  /* (a bag, the powder: with 10, as before, when none is held) */
+                if (((added >> bit) & 1) && k_item_bit_id[bit] >= 0)
+                    native_grant(c, k_item_bit_id[bit], bit == 2 ? (LD8(SAVE + BOMBS) ? 1 : 10) : bit == 8 ? (LD8(SAVE + POWDER) ? 1 : 10) : 1,
+                                 bit >= 13 ? bit - 13 : -1);
+            if (((added >> 3) & 1) && !LD8(SAVE + ARROWS)) native_grant(c, 60, 10, -1);  /* (the bow's 10 arrows) */
+            dev_events_emit("ITEM", "V12_ITEMS_SHARED", "Equipment bits", 0, 0, items, LD32(SAVE + ITEMS), "NATIVE_ADD_ITEM_READBACK", "REMOTE", 0);
             laonline_notify("Shared items received from your team!");
         }
         uint8_t up = LD8(SAVE + UPGRADES), up_want = up;
         for (int bit = 3; bit <= 5; bit++) if (iin[K_UPGRADES + bit - K_ITEMS] > 0) up_want |= (uint8_t)(1u << bit);
-        if (up_want != up) ST8(SAVE + UPGRADES, up_want);
-        if (iin[K_SENSOR - K_ITEMS] > 0 && !(LD8(SAVE + SENSOR) & 1)) ST8(SAVE + SENSOR, LD8(SAVE + SENSOR) | 1);
+        for (int bit = 3; bit <= 5; bit++) if (((up_want & ~up) >> bit) & 1) native_grant(c, 120 + bit, 1, -1);
+        if (iin[K_SENSOR - K_ITEMS] > 0 && !(LD8(SAVE + SENSOR) & 1)) native_grant(c, 116, 1, -1);
         uint8_t lv = LD8(SAVE + LEAVES), lv_want = lv;
         for (int bit = 0; bit < 5; bit++) if (iin[K_LEAVES + bit - K_ITEMS] > 0) lv_want |= (uint8_t)(1u << bit);
-        if (lv_want != lv) ST8(SAVE + LEAVES, lv_want);
+        for (int bit = 0; bit < 5; bit++) if (((lv_want & ~lv) >> bit) & 1) native_grant(c, 23, 1, bit);
         /* Trade sequence: Story Co-op only (Randomizer places trade items on its own). Highest step wins. */
         int trade = iin[K_TRADE - K_ITEMS];
-        if (laonline_launch_choice() == 1 && trade > 0 && trade <= 14 && LD8(SAVE + TRADE) < trade) ST8(SAVE + TRADE, (uint8_t)trade);
+        if (laonline_launch_choice() == 1 && trade_item(trade) >= 0 && LD8(SAVE + TRADE) < trade)
+            native_grant(c, trade_item(trade), 1, -1);
     }
     if (cfg_items && g_settings.laonline_sync_upgrades)  /* V13: bracelet / shield / sword level from distinct places */
         for (int f = 0; f < 3; f++) {
@@ -746,11 +770,10 @@ static void progress_tick(uint64_t frame) {
             }
             uint32_t items = LD32(SAVE + ITEMS); uint8_t up = LD8(SAVE + UPGRADES);
             int have = !(items & (1u << k_prog[f].item_bit)) ? 0 : (up & (1u << k_prog[f].up_bit)) ? 2 : 1;
-            if (want > have) {
-                ST32(SAVE + ITEMS, items | (1u << k_prog[f].item_bit));
-                if (want == 2) ST8(SAVE + UPGRADES, (uint8_t)(up | (1u << k_prog[f].up_bit)));
-                ST32(SAVE + 0x55E4, LD32(SAVE + 0x55E4) | (1u << k_prog[f].lv1) | (want == 2 ? 1u << k_prog[f].lv2 : 0));  /* got bits */
-                dev_events_emit("ITEM", "V13_PROGRESSIVE_LEVEL", k_prog[f].name, want, places, have, want, "SAVE_WRITE", "REMOTE", 0);
+            if (want > have) {  /* (Lv1 its ITEMS bit, Lv2 its UPGRADES bit; the game sets the "got" bits too) */
+                if (have < 1) native_grant(c, k_prog[f].lv1, 1, -1);
+                if (want == 2) native_grant(c, k_prog[f].lv2, 1, -1);
+                dev_events_emit("ITEM", "V13_PROGRESSIVE_LEVEL", k_prog[f].name, want, places, have, want, "NATIVE_ADD_ITEM", "REMOTE", 0);
                 char note[96];
                 if (want == 2) { snprintf(note, sizeof note, "%s - your team found both!", k_prog[f].lv2_name); laonline_notify(note); }
                 else laonline_notify("Shared items received from your team!");
@@ -1245,7 +1268,7 @@ void laonline_v12_tick(struct Cpu *c, uint64_t frame, const char *level, const c
     if (!level) level = "";
     if (cfg_consumables && coop_mode() && save_ready()) rupee_tick(frame);
     snprintf(cur_level, sizeof cur_level, "%s", level); snprintf(cur_room, sizeof cur_room, "%s", room ? room : "");  /* V15.1 */
-    progress_tick(frame);
+    progress_tick(c, frame);
     pvp_tick(c, frame, level, me, have_me);
     knock_tick(frame);
     dive_tick(level, room);

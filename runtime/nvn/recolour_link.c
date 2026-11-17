@@ -43,27 +43,3 @@ static bool tint(int cls, float t[8]) {
 }
 
 const RecolourOption g_recolour_link = {"hair / shield", k_sources, 1, C_HAIR, C_SHIELD_B, tint};
-
-#include "../hle/laonline_appearance.h"
-/* The same masks and native-colour mapping as local cosmetics, using the owner.
- * A Default flag explicitly clears local hair/shield tint for this remote draw. */
-int recolour_link_appearance(int cls, const LaoAppearance *profile, float t[8]) {
-    if (cls < C_HAIR || cls > C_SHIELD_B) return 0;
-    memset(t, 0, 8 * sizeof(float));
-    unsigned slot = cls == C_HAIR ? 1 : 3;
-    if (!(profile->mask & (1u << slot))) return 1;
-    const uint8_t *p = profile->rgb[slot];
-    uint32_t rgb = (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
-    float sh, sf, vf;
-    if (cls == C_HAIR) {
-        col_mapping(30 / 360.0f, 0.94f, 0.74f, rgb, &sh, &sf, &vf);
-        recolour_pack(t, sh, sf, vf, recolour_deg(30), 0.5f, 0, 0.5f);
-    } else if (cls == C_SHIELD_A) {
-        col_mapping(195 / 360.0f, 0.7f, 0.8f, rgb, &sh, &sf, &vf);
-        recolour_pack(t, sh, sf, vf, recolour_deg(195), 0.15f, 0.25f, 0.6f);
-    } else {
-        col_mapping(40 / 360.0f, 0.25f, 0.8f, rgb, &sh, &sf, &vf);
-        recolour_pack(t, sh, sf, vf, recolour_deg(40), 0.5f, 0, 0);
-    }
-    return 1;
-}

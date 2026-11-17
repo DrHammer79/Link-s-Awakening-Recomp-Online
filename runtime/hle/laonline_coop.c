@@ -188,8 +188,16 @@ void laonline_coop_context(uint16_t map,uint16_t room,const char *level) {
  if(map!=map_id || room!=room_id)laonline_diag("minimap.context_changed",map,room,0,0,current_dungeon(level));
  map_id=map;room_id=room;dungeon_index=current_dungeon(level);
 }
+/* LAS Recomp Co-Op's port: a grant made for the team elsewhere (laonline_v12.c native_grant: shared items, levels,
+ * rupees, ammo) is a teammate's, not this player's pickup - not reported back to the team, as this file's own
+ * grants while applying. */
+void laonline_coop_remote_grant(int on) {
+ static int was;
+ if(on) was=applying, applying=1;
+ else applying=was;
+}
 void laonline_coop_pickup(int item,int count,int index) {
- if(!enabled || applying || !g_ga || (!game_version() || strcmp(game_version()->key,"v1_0_0")) || !game_in_play())return;
+ if(!enabled || applying || !g_ga || !game_version() || !game_in_play())return;
  const char *name=lao_pickup_name(item);if(!name || count<1 || count>999)return;
  // V13: sword / shield / Power Bracelet pickups are counted per place for the whole team (Lv1 -> Lv2, laonline_v12.c)
  if(item<=3||item==13||item==14){extern void laonline_v12_progressive_found(int,uint16_t,uint16_t);laonline_v12_progressive_found(item,map_id,room_id);}
@@ -276,7 +284,7 @@ void laonline_coop_tick(Cpu *c,uint64_t frame) {
  extern void laonline_heart_bridge_install(void);
  if(enabled)laonline_heart_bridge_install();
 
- if(!enabled || !seed_ok || (world_required&&!laonline_coop_world_ready()) || !g_ga || (!game_version() || strcmp(game_version()->key,"v1_0_0")) || !game_in_play() ||
+ if(!enabled || !seed_ok || (world_required&&!laonline_coop_world_ready()) || !g_ga || !game_version() || !game_in_play() ||
  !laonline_level_ready() || laonline_ui_paused() || LD32(GA(LIVE_SAVE))!=0xe)return;
  laonline_checks_tick();laonline_story_tick();
  // Bounded replay also repairs an unsaved receipt after loading an older local save.
@@ -335,11 +343,15 @@ void laonline_coop_tick(Cpu *c,uint64_t frame) {
    // PLAYER_STATUS_PTR and writes +84, rather than assuming a save alias.
    int hp=(int16_t)LD16(status+0x84);
    int max=12+4*(__builtin_popcount(LD16(status+0x98)&0x1ff)+__builtin_popcountll(LD64(status+0x90)&0xffffffffull)/4);
-   if(hp>0 && hp<max){int healed=hp+4*(int)p->count;if(healed>max)healed=max;ST16(status+0x84,healed);recovery_result=LD16(status+0x84)==healed?1:0;
+   // LAS Recomp Co-Op's port: through that same AddItem case 100 (hearts + count * 4, up to the maximum), not a write
+   // of +84 (LAS Recomp's review: no direct save writes); the result read back as before.
+   if(hp>0 && hp<max){int healed=hp+4*(int)p->count;if(healed>max)healed=max;
+    {Cpu saved=*c;c->x[0]=100;c->x[1]=p->count;c->x[2]=(uint64_t)(int64_t)-1;c->x[3]=0;lao_dev_remote(1);guest_call(c,GA(ADD_ITEM));lao_dev_remote(0);*c=saved;}
+    recovery_result=LD16(status+0x84)==healed?1:0;
     laonline_diag("recovery.applied",p->map,p->room,p->item,p->seq,healed-hp);
     LOG("[laonline] M6 recovery.applied peer=%s seq=%llu before=%d after=%d max=%d\n",events[i].name,(unsigned long long)p->seq,hp,healed,max);}
    else {recovery_result=hp>=max?2:3;LOG("[laonline] M6 recovery.noop peer=%s seq=%llu hp=%d max=%d\n",events[i].name,(unsigned long long)p->seq,hp,max);}
-  } else if(share && !laonline_v12_resource(p->item,(int)p->count)) {  /* V12: rupees/ammo written directly; others native */
+  } else if(share && !laonline_v12_resource(c,p->item,(int)p->count)) {  /* V12: rupees / ammo there (AddItem); others here */
    Cpu saved=*c;c->x[0]=p->item;c->x[1]=p->count;c->x[2]=(uint64_t)(int64_t)(p->item==48?p->index:-1);c->x[3]=0;
    lao_dev_remote(1);guest_call(c,GA(ADD_ITEM));lao_dev_remote(0);*c=saved;
   }

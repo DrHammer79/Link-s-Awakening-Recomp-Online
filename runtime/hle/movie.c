@@ -239,8 +239,12 @@ static void ex_set_data_source(Cpu *c) {
     // the opening at launch can always be skipped, vanilla and randomizer (with no save yet the game forces it)
     e->skippable = rel && strstr(rel, "movie/opening.webm");
     if (e->skippable) g_skip_pressed_at = 0;  // (a press that ended the title's attract replay isn't for this one)
-    if (rel && strstr(rel, "movie/ending.webm")) { extern void run_timer_ending_movie(void); run_timer_ending_movie(); }  // (the run's end)
-    if (rel && strstr(rel, "movie/ending.webm")) { extern void laonline_v12_ending(void); laonline_v12_ending(); }  // (V14: "<name> saved Koholint!" in Global)
+    if (rel && strstr(rel, "movie/ending.webm")) {  // the run's end; online play tells the others ("X saved Koholint!")
+        extern void run_timer_ending_movie(void), laonline_v12_ending(void);
+        extern bool laonline_configured(void);
+        run_timer_ending_movie();
+        if (laonline_configured()) laonline_v12_ending();
+    }
     if (rel && strstr(rel, "movie/title.webm")) { extern void run_timer_title(void); run_timer_title(); }  // (a new attempt next)
     for (unsigned i = 0; i < e->fmt->nb_streams && e->ntracks < 16; i++)
         if (e->fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO ||
@@ -355,6 +359,18 @@ static void movie_track(int kind, void *p, bool add) {
     for (int i = 0; i < MAX_MOVIE_OBJS; i++)
         if (g_movie_objs[kind][i] == (add ? NULL : p)) { g_movie_objs[kind][i] = add ? p : NULL; break; }
     pthread_mutex_unlock(&g_movie_lock);
+}
+
+// the launch opening playing, still skippable (the touch controls: a tap skips it - runtime/ui/mobile/touch_controls.mm)
+bool movie_opening_playing(void) {
+    bool r = false;
+    pthread_mutex_lock(&g_movie_lock);
+    for (int i = 0; i < MAX_MOVIE_OBJS && !r; i++) {
+        const Extractor *e = g_movie_objs[0][i];
+        if (e && e->skippable && !e->eof) r = true;
+    }
+    pthread_mutex_unlock(&g_movie_lock);
+    return r;
 }
 
 static void ex_dtor(Cpu *c) {

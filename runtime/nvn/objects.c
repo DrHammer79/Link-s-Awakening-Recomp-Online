@@ -5,8 +5,8 @@
 
 #include "../kernel.h"
 #include "nvn.h"
+#include "interp.h"
 #include "rqueue.h"
-#include "pool_registry.h"
 
 void renderer_sync(void);
 
@@ -260,8 +260,8 @@ NVN(nvnMemoryPoolBuilderGetFlags) { RET(G(uint32_t, A(0), 8)); }
 NVN(nvnMemoryPoolBuilderGetMemory) { RET(G(uint64_t, A(0), 0x10)); }
 NVN(nvnMemoryPoolBuilderGetSize) { RET(G(uint64_t, A(0), 0x18)); }
 
-static LaoPoolRegistry pool_registry=LAO_POOL_REGISTRY_INIT;
-RT_ON_RESET(nvn_pool_registry_reset){lao_pool_reset(&pool_registry);}
+static NvnPool pools[256];
+static int npools;
 NVN(nvnMemoryPoolInitialize) {
     NvnPool *p = calloc(1, sizeof *p);
     p->storage = G(uint64_t, A(1), 0x10);
@@ -269,15 +269,17 @@ NVN(nvnMemoryPoolInitialize) {
     p->flags = G(uint32_t, A(1), 8);
     SET_HOST(A(0), p);
     if (getenv("LARECOMP_LOG_BINDS")) LOG("[pool] %llx + %llu KB flags %#x\n", (unsigned long long)p->storage, (unsigned long long)(p->size >> 10), p->flags);
-    if(!lao_pool_add(&pool_registry,A(0),p->storage,p->size,(int)p->flags))LOG("[nvn] pool tracking capacity/validation failure; unknown ranges will not be snapshotted\n");
+    if (npools < 256) pools[npools++] = *p;  // (debug: nvn_pool_flags_at)
     RET(1);
 }
 // (debug) the flags of the pool holding a guest address (-1: none): CPU_NO_ACCESS 1, CPU_UNCACHED 2, CPU_CACHED 4,
 // GPU_NO_ACCESS 8, GPU_UNCACHED 0x10, GPU_CACHED 0x20, SHADER_CODE 0x40, COMPRESSIBLE 0x80, PHYSICAL 0x100, VIRTUAL 0x200
-uint64_t nvn_pool_generation_at(uint64_t addr,uint64_t size,int *flags){return lao_pool_find(&pool_registry,addr,size,flags);}
-int nvn_pool_flags_at(uint64_t addr){int flags;lao_pool_find(&pool_registry,addr,1,&flags);return flags;}
-NVN(nvnMemoryPoolFinalize) {lao_pool_remove(&pool_registry,A(0));free(HOST(NvnPool,A(0)));SET_HOST(A(0),0);}
-
+int nvn_pool_flags_at(uint64_t addr) {
+    for (int i = npools - 1; i >= 0; i--)
+        if (addr >= pools[i].storage && addr < pools[i].storage + pools[i].size) return (int)pools[i].flags;
+    return -1;
+}
+NVN(nvnMemoryPoolFinalize) { interp_free_begin(INTERP_FREE_POOL, HOST(NvnPool, A(0)) ? HOST(NvnPool, A(0))->size : 0); free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); interp_free_end(); }
 NVN(nvnMemoryPoolSetDebugLabel) { (void)c; }
 NVN(nvnMemoryPoolMap) { RET(HOST(NvnPool, A(0))->storage); }
 NVN(nvnMemoryPoolGetBufferAddress) { RET(HOST(NvnPool, A(0))->storage); }  // GPU address == CPU address
@@ -580,7 +582,7 @@ NVN(nvnSamplerInitialize) {
     SET_HOST(A(0), d);
     RET(1);
 }
-NVN(nvnSamplerFinalize) { free(HOST(NvnSamplerDesc, A(0))); SET_HOST(A(0), 0); }
+NVN(nvnSamplerFinalize) { interp_free_begin(INTERP_FREE_SAMPLER, 0); free(HOST(NvnSamplerDesc, A(0))); SET_HOST(A(0), 0); interp_free_end(); }
 NVN(nvnSamplerSetDebugLabel) { (void)c; }
 #define SMP HOST(NvnSamplerDesc, A(0))
 NVN(nvnSamplerGetMinMagFilter) { *(uint32_t *)AP(1) = SMP->min_filter; *(uint32_t *)AP(2) = SMP->mag_filter; }
@@ -710,7 +712,7 @@ NvnDescPool *nvn_find_pool(NvnDescPool **reg, uint64_t guest_pool) {
 
 // ================================================================== programs
 NVN(nvnProgramInitialize) { SET_HOST(A(0), calloc(1, sizeof(NvnProgram))); RET(1); }
-NVN(nvnProgramFinalize) { free(HOST(NvnProgram, A(0))); SET_HOST(A(0), 0); }
+NVN(nvnProgramFinalize) { interp_free_begin(INTERP_FREE_PROGRAM, 0); free(HOST(NvnProgram, A(0))); SET_HOST(A(0), 0); interp_free_end(); }
 NVN(nvnProgramSetDebugLabel) { (void)c; }
 NVN(nvnProgramSetSampleShading) { (void)c; }
 NVN(nvnProgramSetSubroutineLinkage) { RET(1); }

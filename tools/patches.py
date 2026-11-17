@@ -189,25 +189,37 @@ PATCHES[ADV_EXIT_DIALOG_SITE] = _adv_exit_dialog
 
 # Difficulty (runtime/ui/difficulty.mm): Link's damage is computed as `damage << hero` (Hero Mode doubles it;
 # hero = PlayerStatus+0x120 == 1) at these `lsl Wd, Wn, Wm` sites, then subtracted from health (+0x84).
-# Each is redirected to rt_damage(damage, shift) so the difficulty multiplier / one-hit KO applies.
+# Each is redirected to rt_damage(damage, shift) so the difficulty multiplier / one-hit KO applies, then to
+# rt_coop_damage (runtime/hle/coop.c): with local co-op's separate hearts a hit on players 2..8 comes off their own.
 DAMAGE_LSL_SITES = (A.DAMAGE_LSL_SITES_0, A.DAMAGE_LSL_SITES_1, A.DAMAGE_LSL_SITES_2)
 # Fixed damage (-2 quarter hearts, -4 in Hero Mode: `csel w20, w10, w9, eq` with w10=-4, w9=-2).
 DAMAGE_FIXED_SITE = A.DAMAGE_FIXED_SITE
+# (An enemy's hit, at the third lsl site, is then halved by the game: co-op's split for it is COOP_DAMAGE_HALVED_SITE,
+# after that, where the version has it.)
 
 
 def _damage_lsl(gen, a):
     w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
     assert (w & 0xffe0fc00) == 0x1ac02000, hex(w)  # lslv (32-bit)
     rd, rn, rm = w & 31, (w >> 5) & 31, (w >> 16) & 31
-    return (f'{{ extern int32_t rt_damage(int32_t, int32_t); c->x[{rd}] = (uint32_t)rt_damage((int32_t)c->x[{rn}], '
-            f'(int32_t)(c->x[{rm}] & 31)); }}  /* {a:#x}: lsl w{rd}, w{rn}, w{rm} (damage) */')
+    hit = f'rt_damage((int32_t)c->x[{rn}], (int32_t)(c->x[{rm}] & 31))'
+    if not (A.COOP_DAMAGE_HALVED_SITE and a == DAMAGE_LSL_SITES[2]):
+        # (the Link hit, where the game's code holds him: the second site's function keeps him in x20; the third's, an
+        # enemy's hit where the version has no halving site, in x21; the first is an event's damage command - no Link,
+        # Player 1's: every event plays on him)
+        link = {DAMAGE_LSL_SITES[1]: 'c->x[20]', DAMAGE_LSL_SITES[2]: 'c->x[21]'}.get(a, '0')
+        hit = f'rt_coop_damage_of(c, {hit}, {link})'
+    return (f'{{ extern int32_t rt_damage(int32_t, int32_t); extern int32_t rt_coop_damage_of(Cpu *, int32_t, uint64_t); '
+            f'c->x[{rd}] = (uint32_t){hit}; }}'
+            f'  /* {a:#x}: lsl w{rd}, w{rn}, w{rm} (damage) */')
 
 
 def _damage_fixed(gen, a):
     w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
     assert (w & 0xffe00c00) == 0x1a800000 and (w & 31) == 20, hex(w)  # csel w20, ...
     return ('{ extern int32_t rt_damage(int32_t, int32_t); extern int rt_hero_mode(void); '
-            'c->x[20] = (uint32_t)(-rt_damage(2, rt_hero_mode())); }'
+            'extern int32_t rt_coop_damage_of(Cpu *, int32_t, uint64_t); '
+            'c->x[20] = (uint32_t)(-rt_coop_damage_of(c, rt_damage(2, rt_hero_mode()), c->x[19])); }'
             f'  /* {a:#x}: csel w20, -4, -2 (fixed damage) */')
 
 
@@ -293,6 +305,57 @@ def _items_page(gen, a):
 PATCHES[ITEMS_PAGE_SITE] = _items_page
 
 
+# Touch controls (runtime/ui/mobile/touch_controls.mm): main+0xee6f80 is the pause menu's update, once per frame on
+# every page and between them (the Items / Map / System pages' own updates are called from it; found by profiling
+# the System and Map pages against play). Its prologue reports that the pause menu is up.
+PAUSE_MENU_SITE = A.PAUSE_MENU_SITE
+
+
+def _pause_menu(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd10383ff, hex(w)  # sub sp, sp, #0xe0
+    return ('{ extern void rt_pause_menu_tick(void); rt_pause_menu_tick(); c->sp -= 0xe0; }'
+            f'  /* {a:#x}: sub sp, sp, #0xe0 (pause menu shown) */')
+
+
+PATCHES[PAUSE_MENU_SITE] = _pause_menu
+
+
+# The Items page's cursor move: main+0xeb7fdc loads the cell the pressed direction leads to (the page's neighbour
+# table; 0x27 none). A tap on a cell (touch screens) asks for that cell there, so one press moves the cursor straight to
+# it through the game's own move (the old cell let go, the new one picked, its sound): rt_items_nav_pick.
+ITEMS_NAV_SITE = A.ITEMS_NAV_SITE
+
+
+def _items_nav(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xb9400116, hex(w)  # ldr w22, [x8]
+    return ('{ extern uint32_t rt_items_nav_pick(uint32_t); c->x[22] = rt_items_nav_pick(LD32(c->x[8])); }'
+            f'  /* {a:#x}: ldr w22, [x8] (items page: the next cell) */')
+
+
+PATCHES[ITEMS_NAV_SITE] = _items_nav
+
+
+# The file select's cursor (main+0xe61040, each frame while it is shown): a list helper (main+0xe6b160) moves the cursor
+# byte (+0x159b0, the one before it at +0x159b1) up or down among the four files and says whether it moved; on a move
+# the game lets the old file go, picks the new one and plays its sound. A tap on a file (touch screens) puts the cursor
+# there right after the helper, so one press goes straight to it: rt_file_nav_pick.
+FILE_SELECT_NAV_SITE = A.FILE_SELECT_NAV_SITE
+
+
+def _file_select_nav(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x370003c0, hex(w)  # tbnz w0, #0, <moved>
+    t = a + ((w >> 5) & 0x3FFF) * 4
+    return (f'{{ extern int rt_file_nav_pick(uint64_t cursor, int moved); '
+            f'if (rt_file_nav_pick(c->x[19], (int)(c->x[0] & 1))) goto L_{t:x}; }}'
+            f'  /* {a:#x}: tbnz w0, #0 (file select: the cursor moved) */')
+
+
+PATCHES[FILE_SELECT_NAV_SITE] = _file_select_nav
+
+
 # Check tracker (runtime/ui/tracker_overlay.mm): main+0xe93800 runs once per frame only while the pause menu's
 # Map page is shown (fnprof diff of Map vs Items/System/closed). Its prologue reports that.
 MAP_PAGE_SITE = A.MAP_PAGE_SITE
@@ -306,6 +369,21 @@ def _map_page(gen, a):
 
 
 PATCHES[MAP_PAGE_SITE] = _map_page
+
+
+# HUD hearts refresh (runtime/hle/hud_hearts.c): main+0xeaa800 is the HUD's normal state update (x0 = the HUD). Its
+# prologue reruns the HUD's own set-up when a menu changed Link's hearts.
+HUD_HEARTS_SITE = A.HUD_HEARTS_SITE
+
+
+def _hud_hearts(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd102c3ff, hex(w)  # sub sp, sp, #0xb0
+    return ('{ extern void rt_hud_hearts_tick(Cpu *); rt_hud_hearts_tick(c); c->sp -= 0xb0; }'
+            f'  /* {a:#x}: sub sp, sp, #0xb0 (HUD update: hearts refresh) */')
+
+
+PATCHES[HUD_HEARTS_SITE] = _hud_hearts
 
 
 # ... and its epilogue (the page's layout was updated this frame): the check tracker hides the game's own cursor and
@@ -475,6 +553,53 @@ def _bottle1_use(gen, a):
 PATCHES[BOTTLE1_USE_SITE] = _bottle1_use
 
 
+# D-pad items (runtime/hle/dpad_items.c): the d-pad as a third set of item buttons, in the game's own "use it now?"
+# checks. The 12 Items page items each have one (main+0xd50e60 .. 0xd52fb0; Roc's Feather the last): the buttons newly
+# pressed (`bic w8, w8, w9`), then `tbnz w8, #3` (Y) -> `ldrb wN, [x8, #0xa2]` (the item on Y) `cmp wN, #<its slot>`,
+# and the same for X with #2 / +0xa3. The Y test also passes for a newly pressed d-pad direction, and the read then
+# answers the item itself when a direction just pressed holds it - else the item on Y (Y pressed) or none. A direction
+# and Y (or X) pressed together use both items, as Y and X do (bomb arrows); the button slots never change.
+EQUIP_Y_TEST_SITES = (
+    A.EQUIP_Y_TEST_SITES_0, A.EQUIP_Y_TEST_SITES_1, A.EQUIP_Y_TEST_SITES_2, A.EQUIP_Y_TEST_SITES_3,
+    A.EQUIP_Y_TEST_SITES_4, A.EQUIP_Y_TEST_SITES_5, A.EQUIP_Y_TEST_SITES_6, A.EQUIP_Y_TEST_SITES_7,
+    A.EQUIP_Y_TEST_SITES_8, A.EQUIP_Y_TEST_SITES_9, A.EQUIP_Y_TEST_SITES_10, A.EQUIP_Y_TEST_SITES_11,
+)
+EQUIP_Y_READ_SITES = (
+    A.EQUIP_Y_READ_SITES_0, A.EQUIP_Y_READ_SITES_1, A.EQUIP_Y_READ_SITES_2, A.EQUIP_Y_READ_SITES_3,
+    A.EQUIP_Y_READ_SITES_4, A.EQUIP_Y_READ_SITES_5, A.EQUIP_Y_READ_SITES_6, A.EQUIP_Y_READ_SITES_7,
+    A.EQUIP_Y_READ_SITES_8, A.EQUIP_Y_READ_SITES_9, A.EQUIP_Y_READ_SITES_10, A.EQUIP_Y_READ_SITES_11,
+)
+
+
+def _equip_y_test(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w & 0xFFF8001F == 0x37180008, hex(w)  # tbnz w8, #3, <read>
+    t = a + ((((w >> 5) & 0x3FFF) ^ 0x2000) - 0x2000) * 4
+    return (f'{{ extern int rt_equip_y_test(uint32_t pressed); if (rt_equip_y_test((uint32_t)c->x[8])) goto L_{t:x}; }}'
+            f'  /* {a:#x}: tbnz w8, #3 (Y newly pressed, or a d-pad direction) */')
+
+
+EQUIP_Y_READ_SLOTS = (0xf, 0xe, 0xd, 0x6, 0x5, 0x4, 0x3, 0x2, 0x7, 0xc, 0x8, 0x9)  # (each check's item, its `cmp`)
+
+
+def _equip_y_read(gen, a):
+    at = a - gen.base
+    w = struct.unpack_from('<I', gen.nso.image, at)[0]
+    assert w & 0xFFFFFFE0 == 0x39428900 and w & 31 < 30, hex(w)  # ldrb wN, [x8, #0xa2]
+    slot = EQUIP_Y_READ_SLOTS[EQUIP_Y_READ_SITES.index(a)]
+    if at + 8 <= len(gen.nso.image):
+        n = struct.unpack_from('<I', gen.nso.image, at + 4)[0]
+        assert n == 0x7100001F | slot << 10 | (w & 31) << 5, hex(n)  # cmp wN, #<slot>
+    return (f'{{ extern uint32_t rt_equip_y_read(uint64_t ps, int slot); c->x[{w & 31}] = rt_equip_y_read(c->x[8], {slot}); }}'
+            f'  /* {a:#x}: ldrb w{w & 31}, [x8, #0xa2] (item on Y; item {slot:#x} on a d-pad direction) */')
+
+
+for _a in EQUIP_Y_TEST_SITES:
+    PATCHES[_a] = _equip_y_test
+for _a in EQUIP_Y_READ_SITES:
+    PATCHES[_a] = _equip_y_read
+
+
 # Boss souls (runtime/hle/souls.c): the actor factory f_70008f5ea0 (x2 = spawn info, type u16 at +8) takes the type's
 # create function from the actor table (main+0x1bcc898, 0x58 bytes per type, +0 create fn, +0x50 name); a null fn is
 # its "no such actor" path (the caller gets an empty handle). A dungeon boss whose soul isn't found yet gets that path.
@@ -516,6 +641,22 @@ def _hookshot_attr(gen, a):
 PATCHES[HOOKSHOT_ATTR_SITE] = _hookshot_attr
 
 
+# Hookshot 8-way aim (runtime/hle/hookshot.c, setting hookshot_8way): Link's hookshot action, on entering its Start state
+# (main+0xdbb760), computes his flat forward vector and stores it here (q0) as the direction it gives the hook
+# (main+0xd82a80, its only caller). The runtime can round q0 to the nearest of 8 directions first.
+HOOKSHOT_DIR_SITE = A.HOOKSHOT_DIR_SITE
+
+
+def _hookshot_dir(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x3d80be60, hex(w)  # str q0, [x19, #0x2f0]
+    return ('{ extern void rt_hookshot_dir(Cpu *); rt_hookshot_dir(c); memcpy((void *)(uintptr_t)(c->x[19] + 0x2f0), &c->v[0], 16); }'
+            f'  /* {a:#x}: str q0, [x19, #0x2f0] (hookshot firing direction) */')
+
+
+PATCHES[HOOKSHOT_DIR_SITE] = _hookshot_dir
+
+
 # 360-degree movement (runtime/hle/qol.c, setting move_360): main+0xded9f0 snaps Link's stick vector (s1 = x, s2 = y)
 # to one of 8 directions and returns it as a 32-bit angle (full turn = 2^32, 0 = down). With the setting on, the
 # runtime returns the stick's own angle instead (as the community "360 Controls" mod does).
@@ -554,6 +695,23 @@ def _walk_speed(gen, a):
 
 for _a in WALK_SPEED_SITES:
     PATCHES[_a] = _walk_speed
+
+
+# Wind push (runtime/nvn/weather.c rt_wind_push: a blizzard's wind, for a randomizer option; off by default): Link's
+# move (main+0xd57260, every state's) has just summed the frame's displacement - knockback, walking, a pit's pull, a
+# platform's carry - at [x29-0x80] (world units, this frame; x19 = Link, s1 = the frame's dt) and hands it to the
+# collision move next, so a push added there is stopped by walls and ledges like his walking.
+WIND_PUSH_SITE = A.WIND_PUSH_SITE
+
+
+def _wind_push(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x38686a68, hex(w)  # ldrb w8, [x19, x8]
+    return ('{ extern void rt_wind_push(Cpu *); rt_wind_push(c); c->x[8] = LD8(c->x[19] + c->x[8]); }'
+            f'  /* {a:#x}: ldrb w8, [x19, x8] (Link move: the wind push) */')
+
+
+PATCHES[WIND_PUSH_SITE] = _wind_push
 
 
 # Walk animation rate: main+0xdce320 (walk state) has the walk animation's play rate in s8 (1, 0.75 on slow ground,
@@ -882,6 +1040,35 @@ SHADOW_LINK_APPEAR_SITE = A.SHADOW_LINK_APPEAR_SITE
 # and the area's own music plays on (runtime/hle/miniboss.c rt_shadow_link_bgm).
 SHADOW_LINK_BGM_SITE = A.SHADOW_LINK_BGM_SITE
 
+# Online play (runtime/hle/laonline.c): another PC's player is a Shadow Link actor moved to where that player is. His
+# update's entry (sub sp, sp, #0x40) asks laonline_native_shadow_update first, which skips the rest of it for such a
+# puppet - his targeting, his choices, his reactions to hits - while his model and animation components still update;
+# the animation player's entry (sub sp, sp, #0x60) lets laonline_native_animation see each animation played (the local
+# Link's are sent, the remote player's played on his puppet). Both only with online play set up (g_laonline_on:
+# laonline.c laonline_configured), as is the Game Over hook. The Game Over event just submitted (ldr x20, [sp, #0x18],
+# after Common.bfevfl GameOver's EventManager::Submit) tells the others (laonline_death.c).
+LAONLINE_GAMEOVER_SITE = A.LAONLINE_GAMEOVER_SITE
+
+
+def _laonline_shadow_update(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd10103ff, hex(w)  # sub sp, sp, #0x40
+    return ('{ extern _Bool g_laonline_on; extern int laonline_native_shadow_update(Cpu *); '
+            'if (g_laonline_on && laonline_native_shadow_update(c)) return; '
+            f'c->sp -= 0x40; }}  /* {a:#x}: sub sp, sp, #0x40 (Shadow Link update: online play\'s puppet) */')
+
+
+def _laonline_animation(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd10183ff, hex(w)  # sub sp, sp, #0x60
+    return ('{ extern _Bool g_laonline_on; extern void laonline_native_animation(Cpu *); '
+            'if (g_laonline_on) laonline_native_animation(c); c->sp -= 0x60; }'
+            f'  /* {a:#x}: sub sp, sp, #0x60 (an animation played: online play) */')
+
+
+PATCHES[A.LAONLINE_SHADOW_UPDATE_SITE] = _laonline_shadow_update
+PATCHES[A.LAONLINE_ANIMATION_SITE] = _laonline_animation
+
 # An actor's AI starting one of its events (main+0x94a510, x20 = the AI, flow name at [x29-0x40]): right before it
 # builds the event request (bl main+0x80c290). Any event request holds Link still while it runs; a randomizer item
 # picked up from the ground (a SinkingSword item actor) whose entry only sets its flag and adds a rupee / heart /
@@ -908,12 +1095,33 @@ SHAPE_SIM_SITES = [A.SHAPE_SIM_SITES_0, A.SHAPE_SIM_SITES_1]
 # so the effect plays where the item is.
 EFFECT_BONE_SITE = A.EFFECT_BONE_SITE
 
+# Text speed (issue #681, runtime/hle/text_speed.c). A message pane's text shows by playing a layout animation: its
+# frame is how much of the text is drawn. Each window opening (main+0xf53c80) sets the pane's step to 2 (pane+0x284;
+# times pane+0x280, frames per character unit). The pane's update (main+0xf534e0, every message layout's) plays the
+# animation at that step while its frame is short of the page's end and sets the frame to the end once it is there.
+# B mid-page sets the frame to the end too (main+0xf53b60). Fast scales the step; Instant takes the "at the end"
+# branch at once. The window's states (Reading, KeyWaiting, Selecting, TimerWaiting) still wait for the button or
+# timer as before.
+TEXT_RATE_SITE = A.TEXT_RATE_SITE  # str w8, [x0, #0x284]
+TEXT_SNAP_SITE = A.TEXT_SNAP_SITE  # b.lt: the frame is short of the page's end
+
 # ---- hook sites: the instruction stays as it is; just before it the runtime's rt_hook (runtime/hle/hooks.c) is asked
 # what to do - 0 run it, 1 the hook did it all, 2.. jump to the site's first.. target (each a label in its function).
 # The game code they generate never changes when a hook's behaviour does: only a new site needs the game code
 # rebuilt. New game-code changes go here, as a hook, unless they can't.
 # site -> (the instruction word, (jump targets...), what it's for)
+# Power-up music (powerup_music.c): the pickup starts BGM_NUTS directly. Four music paths independently check
+# Link's sound-disable bit at +0x1b8c; set it only in their local copies so normal music isn't muted or replaced.
+BUFF_MUSIC_PICKUP_SITE = A.BUFF_MUSIC_PICKUP_SITE
+BUFF_MUSIC_FLAGS_SITES = [A.BUFF_MUSIC_FLAGS_SITES_0, A.BUFF_MUSIC_FLAGS_SITES_1,
+                        A.BUFF_MUSIC_FLAGS_SITES_2, A.BUFF_MUSIC_FLAGS_SITES_3]
+
 HOOKS = {
+    BUFF_MUSIC_PICKUP_SITE: (0x97ccd77b, (), 'bl main+0xaf560: Guardian Acorn / Piece of Power music'),
+    BUFF_MUSIC_FLAGS_SITES[0]: (0xb95b8d15, (), 'ldr w21, [x8, #0x1b8c]: music update, power-up sound flag'),
+    BUFF_MUSIC_FLAGS_SITES[1]: (0xb95b8d14, (), 'ldr w20, [x8, #0x1b8c]: zone music, power-up sound flag'),
+    BUFF_MUSIC_FLAGS_SITES[2]: (0xb95b8d15, (), 'ldr w21, [x8, #0x1b8c]: event music, power-up sound flag'),
+    BUFF_MUSIC_FLAGS_SITES[3]: (0xb95b8d15, (), 'ldr w21, [x8, #0x1b8c]: power-up presentation, sound flag'),
     MB_SEEN_SITE: (0xf94002a8, (), 'ldr x8, [x21]: an actor seen - field mini-bosses (miniboss.c)'),
     CRASHOUT_SITE: (0xb900b81f, (A.CRASHOUT_SKIP,), 'str wzr, [x0, #0xb8]: Blaino knock-out, no crash-out on the Field'),
     GOHMA_HEADING_SITES[0]: (0xb915ee68, (), 'str w8, [x19, #0x15ec]: Gohma heading at Link on the Field'),
@@ -923,6 +1131,7 @@ HOOKS = {
     MSTALFOS_JUMP_SITE: (0x1e213800, (), 'fsub s0, s0, s1: Master Stalfos jump arc from his takeoff height'),
     SHADOW_LINK_APPEAR_SITE: (0xf9411809, (A.SHADOW_LINK_APPEAR_SKIP,), 'ldr x9, [x0, #0x230]: Shadow Link, no Appear event on the Field'),
     SHADOW_LINK_BGM_SITE: (0x97ff5eac, (), 'bl main+0xce8ce0: Shadow Link starts his chamber music, not outside it'),
+    LAONLINE_GAMEOVER_SITE: (0xf9400ff4, (), 'ldr x20, [sp, #0x18]: the Game Over event submitted (online play)'),
     ACTOR_EVENT_SITE: (0x97fb074a, (A.ACTOR_EVENT_SKIP,), 'bl main+0x80c290: an actor\'s event request (quick pickups: none)'),
     MCHIEF_STORY_SITE: (0x37380148, (A.MCHIEF_STORY_SKIP,), 'tbnz w8, #7: Moblin Chief, no story check on the Field'),
     DIG_HOLE_SITE: (0xf94007f6, (), 'ldr x22, [sp, #8]: a hole was dug (digs.c)'),
@@ -939,28 +1148,188 @@ HOOKS = {
     SHAPE_SIM_SITES[0]: (0xaa0003f4, (A.SHAPE_SIM_SKIP_0,), 'mov x20, x0: a PhysX shape change, no update without its simulation object (#314)'),
     SHAPE_SIM_SITES[1]: (0xaa0003e1, (A.SHAPE_SIM_SKIP_1,), 'mov x1, x0: a PhysX shape change, no update without its simulation object (#314)'),
     EFFECT_BONE_SITE: (0xf9402ac0, (A.EFFECT_BONE_SKIP,), 'ldr x0, [x22, #0x50]: a bone-following effect without its bone, at the actor instead (#349)'),
+    TEXT_RATE_SITE: (0xb9028408, (), 'str w8, [x0, #0x284]: a message pane\'s text step, set as a window opens (#681)'),
+    TEXT_SNAP_SITE: (0x540002cb, (), 'b.lt: message text short of the page\'s end, Instant shows it all (#681)'),
 }
-# Confirmed GameOver submission observer. Only game 1.0.0 is audited.
-from game_addresses import SELECTED as _selected_game
-if _selected_game == 'v1_0_0':
-    HOOKS[0x7000dab000] = (0xf9400ff4, (), 'native Common/GameOver request submitted; observe only')
+
+# ---- local co-op (runtime/hle/coop.c, setting coop_players): 2-8 Links on one screen, each on a controller of its
+# own. The hook points of the community Link's Awakening co-op mod (an exlaunch "pxtch" module for 1.0.1: subsdk9 with
+# its patch table, read 2026-10-27), ported; each asks the runtime, which with co-op off runs the instruction as it is.
+# The creator / placement / door-entry hooks sit on their function's first instruction: with co-op on the runtime
+# calls the function once per player itself (coop_create...) and the hook then jumps to its `ret`. The other
+# 1.0.0-and-other-versions tables have 0 there: no co-op in those versions.
+_COOP_HOOKS = {
+    A.COOP_CREATE_SITE: (0xf81c0ffc, (A.COOP_CREATE_RET,),
+                         'str x28, [sp, #-0x40]!: the player creator (an event action) - once per player'),
+    A.COOP_ZONE_SITE: (0x9400024a, (), 'bl main+0x83afa0: the creator\'s zone set-up - Player 1 only'),
+    A.COOP_DUP_SITE: (0xb5001840, (), 'cbnz x0: an actor of that name exists already - a second Link is let through'),
+    A.COOP_PLACE_SITE: (0xa9bd57f6, (A.COOP_PLACE_RET,),
+                        'stp x22, x21, [sp, #-0x30]!: Link placed at a spawn point - every player on it'),
+    A.COOP_PLACE_PLAYER_SITE: (0xf9425e74, (), 'ldr x20, [x19, #0x4b8]: the Link the placement moves'),
+    A.COOP_SPAWN_CHECK_SITE: (0xf94106c0, (A.COOP_SPAWN_CHECK_SKIP,),
+                              'ldr x0, [x22, #0x208]: a spawn check whose object is gone with more Links (null)'),
+    A.COOP_CTRL_SITE: (0xa9406916, (), 'ldp x22, x26, [x8]: Link\'s controller - each player his own'),
+    A.COOP_COLOR_SITE: (0xd63f0100, (), 'blr x8: Link\'s tunic colour frame - one set per player'),
+    A.COOP_ENTER_SITE: (0xd10283ff, (A.COOP_ENTER_RET,), 'sub sp, sp, #0xa0: Link walking in through a door'),
+    A.COOP_SCROLL_SITE: (0xf90003e8, (), 'str x8, [sp]: event entry "ZeldaScroll" (the mod renamed it; left as it is)'),
+    A.COOP_PAD_STATE_SITE: (0x54003181, (), 'b.ne: controller manager busy (applet) - controllers polled anyway'),
+    A.COOP_APPLET_SITE: (0x390047f4, (), 'strb w20, [sp, #0x11]: controller applet player count'),
+    A.COOP_APPLET_SINGLE_SITE: (0x390057e8, (), 'strb w8, [sp, #0x15]: controller applet single-player mode'),
+    # PhysX character controllers (CCT SweepTest's geometry sweep loop, both variants): x28 a touched geometry, x8 its
+    # sweep function - none skips it. Another Link's capsule is skipped for a Link: players walk through each other.
+    A.COOP_CCT_SWEEP_SITE_0: (0xb4000728, (A.COOP_CCT_SWEEP_SKIP_0,), 'cbz x8: a touched geometry without a sweep function'),
+    A.COOP_CCT_SWEEP_SITE_1: (0xb4000508, (A.COOP_CCT_SWEEP_SKIP_1,), 'cbz x8: a touched geometry without a sweep function'),
+    # The actors' per-frame update (main+0xfacb..: x0 an actor's update callback, [x0+8] the actor): while an enemy's
+    # runs, the game manager's player (+0x4b8: "Link" to everything) is the Link it targets; Player 1's again after.
+    A.COOP_ACTOR_EXEC_SITE: (0xd63f0120, (), 'blr x9: an actor\'s update'),
+    A.COOP_ACTOR_EXEC_DONE: (0xf94007e8, (), 'ldr x8, [sp, #8]: after an actor\'s update'),
+    # A camera's per-frame update (x23 the camera): its view matrix is set (+0x580..+0x5bf). The runtime keeps the
+    # camera to put the knocked-out players' "Zzz" bubbles over them (runtime/ui/coop_hud.mm).
+    A.COOP_CAMERA_SITE: (0xf94156e8, (), 'ldr x8, [x23, #0x2a8]: a camera\'s view matrix is set'),
+    # Hearts gained (a heart, a healing amount): w23 the new total before the maximum caps it - the other players get
+    # all of it, even what Player 1 had no room for.
+    A.COOP_HEAL_SITE_0: (0x79010928, (), 'strh w8, [x9, #0x84]: Link\'s hearts after a heart'),
+    A.COOP_HEAL_SITE_1: (0x79010928, (), 'strh w8, [x9, #0x84]: Link\'s hearts after a healing amount'),
+    # Exits (setting coop_host_exits): an AreaLevelOpen (doors, loading zones) keeps a touching player actor (x23,
+    # main+0x76e90) whose +0x43 bit 6 is clear as its pending exit, which its update (main+0x75320) plays out for the
+    # game manager's player; AreaUpstairs / AreaDownstairs keep the player on them (x8, main+0x617a0) and forget him
+    # when a player leaves (main+0x61600). Another player's Link reads as one with the bit set: he takes no one along.
+    A.COOP_EXIT_TOUCH_SITE: (0x39410ee9, (), 'ldrb w9, [x23, #0x43]: a Link touching a door / loading zone'),
+    A.COOP_STAIRS_TOUCH_SITE: (0x39410d08, (), 'ldrb w8, [x8, #0x43]: a Link stepping on stairs'),
+    A.COOP_STAIRS_LEAVE_SITE: (0x39410d08, (), 'ldrb w8, [x8, #0x43]: a Link stepping off stairs'),
+    # A contact with an AreaLevelOpen ending (its end functor, main+0x76aa0: x1 the contact) drops its pending exit
+    # (main+0x76b20) whoever left: another player's Link leaving - as when he is put on Player 1 walking in - doesn't.
+    A.COOP_EXIT_LEAVE_SITE: (0xa9be4ff4, (), 'stp x20, x19, [sp, #-0x20]!: a contact with a door / loading zone ends'),
+    A.COOP_EXIT_LEAVE_CLEAR: (0x94000015, (), 'bl main+0x76b20: its pending exit dropped'),
+    # Camera areas: every Link has a camera (+0x318), each listening to the camera-area manager (main+0x836270,
+    # signal +0x750: x1 the area Player 1 now stands in). A camera whose +0x515 is set answers a new scroll area with
+    # the "ZeldaScroll" event (main+0xbc540): Player 1 walks on into it. Only Player 1's camera's answer counts.
+    A.COOP_CAMERA_SCROLL_SITE: (0x39545668, (), 'ldrb w8, [x19, #0x515]: a camera\'s scroll on a new camera area'),
+    # A-button actions (lift, talk, open, read...): an object's DoAction component checks itself against "Link"
+    # (main+0xea240) and the best of the frame is kept in one slot, which the frame's end (main+0xe8be0) makes the
+    # current one, what Link's state code acts on (main+0xe8d90). Each player gets his own slots.
+    A.COOP_DOACTION_SITE: (0xd10183ff, (A.COOP_DOACTION_RET,), 'sub sp, sp, #0x60: a DoAction component checked against Link - for each player'),
+    A.COOP_DOACTION_FRAME_SITE: (0xa9be4ff4, (), 'stp x20, x19, [sp, #-0x20]!: the frame\'s best DoAction becomes the current one - for each player'),
+    A.COOP_DOACTION_GET_SITE: (0xa9be4ff4, (A.COOP_DOACTION_GET_RET,),
+                               'stp x20, x19, [sp, #-0x20]!: Link asks for his current DoAction - one taker per object'),
+    # Event boxes (AreaEventBox: a fight room's lock, a boss's or mini-boss's start, a cutscene's trigger) are a bare
+    # collision shape (main+0x68110) whose contact signal calls the box's fire (main+0x67210: x0 the box, x1 the
+    # contact) for any Link that walks in. Only Player 1's contact fires it; another player's goes to its ret.
+    A.COOP_EVENT_BOX_SITE: (0xf81e0ff3, (A.COOP_EVENT_BOX_RET,), 'str x19, [sp, #-0x20]!: an event box fires'),
+    # Warp holes (AreaWarpHoleEventBox: main+0x8c560 stepped in - Player 1 jumps in, the "Where to?" menu -,
+    # main+0x8c3d0 stepped out) keep a player actor whose +0x43 bit 6 is clear. Another player's Link reads as one
+    # with the bit set: he sets nothing off and his leaving doesn't drop Player 1.
+    A.COOP_WARP_HOLE_TOUCH_SITE: (0x39410d08, (), 'ldrb w8, [x8, #0x43]: a Link stepping into a warp hole'),
+    A.COOP_WARP_HOLE_LEAVE_SITE: (0x39410d08, (), 'ldrb w8, [x8, #0x43]: a Link stepping out of a warp hole'),
+    # A state machine's change of state (main+0xd34660: x0 the machine, Link's at +0x4e0; w1 the state): another
+    # player's Link sent to the dead state (0x12, 0x13), whose start plays the game over, is knocked out instead.
+    A.COOP_DEAD_STATE_SITE: (0xd100c3ff, (A.COOP_DEAD_STATE_RET,), 'sub sp, sp, #0x30: a state machine changes state'),
+    # The level's screens around Player 1 (main+0x85c280, each frame), each a box centred on him: those it takes in
+    # get their objects made (s1 across x s2 deep, from a table by the level's kind at main+0x1701e40: the Field's
+    # 75 x 60), those outside a larger one lose them (s0..s3 its half sizes: 90 x 72), and those inside a third are
+    # active - their ground solid, their objects running (s3, s4 half sizes, s5 its offset deep, main+0x1701ed4: about
+    # 4 x 3 screens on the Field). With co-op the third takes in every player and the screen around him, so each one
+    # stands on ground, and the first two grow with the camera's zoom, so the view doesn't reach past what's made.
+    A.COOP_LOAD_BOX_SITE: (0xf0007297, (), 'adrp x23: the box of screens whose objects are made (s1 x s2)'),
+    A.COOP_KEEP_BOX_SITE: (0x0d4092e0, (), 'ld1 {v0.s}[1], [x23]: the box of screens whose objects are kept (s0..s3)'),
+    A.COOP_ACTIVE_BOX_SITE: (0x1e233808, (), 'fsub s8, s0, s3: the box of screens that are active (s3, s4, s5)'),
+    # The overworld's warp holes are objects of their own (main+0xcba000...: event/Field.bfevfl, "WarpHole"), whose
+    # contact checks the player actor's +0x43 bit 6 the same way (main+0xcbd3e0 stepped in: +0x405 set, its update
+    # then walks the game manager's player over and jumps him in; main+0xcbd250 stepped out): another player stepping
+    # in walked Player 1 - everyone with him - slowly over to it (user 2026-10-28).
+    A.COOP_WARP_OBJ_TOUCH_SITE: (0x39410d08, (), 'ldrb w8, [x8, #0x43]: a Link stepping into a warp hole object'),
+    A.COOP_WARP_OBJ_LEAVE_SITE: (0x39410d08, (), 'ldrb w8, [x8, #0x43]: a Link stepping out of a warp hole object'),
+    # The shadow map's world box (each frame, main+0x10540: Player 1's position plus a box kept relative to him - about
+    # 34 x 16 x 33 on the Field - or the union of a list of objects' boxes; stored at the view's +0x200 min, +0x210 max,
+    # and the same values at main+0x11228 to a second view): the shadow map is fitted to it. Zoomed out the view reached
+    # past it, and the shadows at its edge ran on as dark diagonal stripes (user 2026-10-29): it grows with the camera's
+    # zoom here, where it is made, so everything that reads it agrees (grown only where the projection is fitted,
+    # main+0x100a460, the casters were drawn off-centre and cut off in the map, and most shadows were lost).
+    A.COOP_SHADOW_BOX_SITE: (0xad100101, (), 'stp q1, q0, [x8, #0x200]: the shadow map\'s world box around Player 1, stored'),
+    # A dungeon's collapse tile (ObjDungeonCollapseTile...) drops when the game manager's player comes within 1.35 across
+    # of its middle, checked in a job of its own (main+0xb01a40, x19 the tile; not an actor update, where "Link" is
+    # swapped for enemies): only Player 1 set one off (user 2026-10-30). The Link it measures is the one nearest it.
+    A.COOP_TILE_PLAYER_SITE: (0xf9425e88, (), 'ldr x8, [x20, #0x4b8]: the Link a collapse tile measures'),
+    # A Like Like's state handlers (main+0x4a64c0...0x4ab1d0, x19 the Like Like) run outside its update, where "Link"
+    # is the player it goes for: one that went for Player 2 caught him by flying onto Player 1 (user 2026-10-30). Its
+    # nine reads of the game manager's player get the player it goes for.
+    A.COOP_LIKELIKE_SITE_0: (0xf9425eb6, (), 'ldr x22, [x21, #0x4b8]: "Link" for a Like Like (x19)'),
+    A.COOP_LIKELIKE_SITE_1: (0xf9425e95, (), 'ldr x21, [x20, #0x4b8]: "Link" for a Like Like (x19)'),
+    A.COOP_LIKELIKE_SITE_2: (0xf9425e89, (), 'ldr x9, [x20, #0x4b8]: "Link" for a Like Like (x19)'),
+    A.COOP_LIKELIKE_SITE_3: (0xf9425e95, (), 'ldr x21, [x20, #0x4b8]: "Link" for a Like Like (x19)'),
+    A.COOP_LIKELIKE_SITE_4: (0xf9425e95, (), 'ldr x21, [x20, #0x4b8]: "Link" for a Like Like (x19)'),
+    A.COOP_LIKELIKE_SITE_5: (0xf9425e88, (), 'ldr x8, [x20, #0x4b8]: "Link" for a Like Like (x19)'),
+    A.COOP_LIKELIKE_SITE_6: (0xf9425e88, (), 'ldr x8, [x20, #0x4b8]: "Link" for a Like Like (x19)'),
+    A.COOP_LIKELIKE_SITE_7: (0xf9425ea8, (), 'ldr x8, [x21, #0x4b8]: "Link" for a Like Like (x19)'),
+    A.COOP_LIKELIKE_SITE_8: (0xf9425e95, (), 'ldr x21, [x20, #0x4b8]: "Link" for a Like Like (x19)'),
+    # An enemy's hit (DAMAGE_LSL_SITES[2]) is then halved by the game - flag 0x6f (main+0x8d1a30) or PlayerStatus+0x9c
+    # negative: the Blue Clothes, a Guardian Acorn - and both ways meet here with the hit in w20. Co-op's split
+    # (rt_coop_damage) is here, not at the lsl: there, Player 1's hits were halved and the others' weren't (user
+    # 2026-11-02, "P1 takes hardly any damage, and other players take full damage").
+    A.COOP_DAMAGE_HALVED_SITE: (0x79410908, (), 'ldrh w8, [x8, #0x84]: an enemy\'s hit (w20), after its halving'),
+    # A Link's update (main+0xd355c0, x19 the Link) looks up the scene (the game manager's +0x4a8 is the game state
+    # machine, its +0x88 the scene, through main+0x11b70; the description below says "player entity", the older
+    # reading - kept, as it is in the generated code) and keeps his spot on safe ground in it (+0x680, snapped; +0x690 his facing; +0x694 set): the
+    # save's restart point (main+0xdfc710 -> main+0xdfcb90, file +0x559c). Every Link did, so it was the last one
+    # updated - the first one made. Only Player 1's finds the object.
+    A.COOP_RESTART_SITE: (0xf9425681, (), 'ldr x1, [x20, #0x4a8]: a Link\'s update looks up the player entity (its restart point)'),
+    # The actor base class: its constructor (main+0x1bdb0, from every actor class's) copies the spawn info's key and type
+    # into the actor (+0x98, +0xa0), its destructor (main+0xfa7970) ends it. Co-op tells actors apart by the type they
+    # were made as (runtime/hle/coop/targets.inc: actor_made, actor_gone).
+    A.COOP_ACTOR_TYPE_SITE: (0x79014268, (), 'strh w8, [x19, #0xa0]: an actor made - kept with its type'),
+    A.COOP_ACTOR_GONE_SITE: (0xa9bd57f6, (), 'stp x22, x21, [sp, #-0x30]!: an actor\'s base destructor - forgotten'),
+    # An enemy's parts that go by "Link": its reaction component (base class constructor main+0x12fae0 - the enemies',
+    # the objects', the NPCs' - destructor main+0xeb410) and its effect player (TailorPlayer: built in place twice,
+    # destructor main+0xe3b510), each kept from storing its class to its destructor.
+    A.COOP_PART_SITE_0: (0xf9000268, (), 'str x8, [x19]: a reaction component stores its class - kept'),
+    A.COOP_PART_SITE_1: (0xf9000288, (), 'str x8, [x20]: an effect player component stores its class - kept'),
+    A.COOP_PART_SITE_2: (0xf90002c8, (), 'str x8, [x22]: an effect player component stores its class - kept'),
+    A.COOP_PART_GONE_SITE_0: (0xd100c3ff, (), 'sub sp, sp, #0x30: a reaction component\'s destructor - forgotten'),
+    A.COOP_PART_GONE_SITE_1: (0xd100c3ff, (), 'sub sp, sp, #0x30: an effect player\'s destructor - forgotten'),
+    # The culling pass (main+0x8529b0, x27 the view camera) builds its view from the camera's eye (its node +0x510,
+    # +0xb0) and far plane (+0x56c), read right after this load. It runs once per world step; the camera is moved back
+    # (COOP_CAMERA_SITE) once per drawn frame, in the view's set-up (main+0x10540). In the game's 30 fps mode (two
+    # steps a frame) the first step's pass ran before it, with the camera as the game left it: zoomed out, it culled
+    # for the view the game would have without the zoom, and enemies and objects past it flickered or stayed gone.
+    A.COOP_CULL_SITE: (0xbd456b6a, (), 'ldr s10, [x27, #0x568]: the culling pass reads the view camera'),
+    # The creator makes its new Link's camera the scene's (bl main+0xbfda0: the camera manager switched to it, x3 the
+    # camera, a shared_ptr back at sp+0x50). Only Player 1's camera is the scene's: for another player's Link, made
+    # as a level starts or as he joins in play, the switch is skipped and nothing comes back.
+    A.COOP_JOIN_CAMERA_SITE: (0x97e215ef, (), 'bl main+0xbfda0: the scene camera switched to the new Link\'s - Player 1 only'),
+}
+HOOKS.update({a: h for a, h in _COOP_HOOKS.items() if a})
 
 
-
-# LA-Online: actor-scoped isolation at the Shadow Link update entry. Native
-# render/animation components still update; targeting, nav decisions, damage
-# reactions and combat states in this update do not execute for the puppet.
-def _laonline_shadow_update(gen, a):
+# ---- local co-op: "Link" for an enemy. The game's code reads "Link" from its game manager's player slot (+0x4b8);
+# with co-op an enemy goes for the player nearest it, so while one updates its reads have to give that player. Each
+# `ldr xT, [xN, #0x4b8]` of the main program (runtime/game_addresses/coop_player_reads_<version>.txt, made by
+# tools/coop_player_reads.py) is rt_coop_player(xN) (runtime/hle/coop.c), which loads it - or gives the Link to use: with co-op off, off the game
+# thread, outside an enemy's update or for another object's +0x4b8 (it checks xN is the game manager), what the slot
+# holds. The slot itself is never written. Not the sites that are hooks already (the Like Like's, the collapse tile's,
+# the placement's: those decide for themselves).
+def _player_read(gen, a):
     w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
-    assert w == 0xd10103ff, hex(w)
-    return ('{ extern int laonline_native_shadow_update(Cpu *); '
-            'if (laonline_native_shadow_update(c)) return; c->sp -= 0x40; }')
+    assert w == _PLAYER_READS[a], f'{a:#x}: instruction {w:#010x}, expected {_PLAYER_READS[a]:#010x}'
+    rt, rn = w & 31, (w >> 5) & 31
+    return (f'{{ extern uint64_t rt_coop_player(uint64_t); c->x[{rt}] = rt_coop_player(c->x[{rn}]); }}'
+            f'  /* {a:#x}: ldr x{rt}, [x{rn}, #0x4b8] ("Link") */')
 
-def _laonline_animation(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
-    assert w == 0xd10183ff, hex(w)
-    return ('{ extern void laonline_native_animation(Cpu *); '
-            'laonline_native_animation(c); c->sp -= 0x60; }')
 
-PATCHES[A.LAONLINE_SHADOW_UPDATE_SITE] = _laonline_shadow_update
-PATCHES[A.LAONLINE_ANIMATION_SITE] = _laonline_animation
+def _player_reads():
+    import game_addresses
+    if not A.COOP_ACTOR_EXEC_SITE:  # (a version without co-op: no list)
+        return {}
+    # (beside the address tables: in the repository, or bundled with the generator - game_addresses.TABLE_DIR)
+    path = game_addresses.TABLE_DIR / f'coop_player_reads_{game_addresses.SELECTED}.txt'
+    reads = {}
+    for line in open(path):  # (missing: an error - without it the enemies would all go for Player 1, silently)
+        if line.strip() and not line.startswith('#'):
+            a, w = line.split()[:2]
+            reads[int(a, 16)] = int(w, 16)
+    assert reads, f'{path}: no reads listed'
+    return reads
+
+
+_PLAYER_READS = {a: w for a, w in _player_reads().items() if a not in HOOKS and a not in PATCHES}
+for _a in _PLAYER_READS:
+    PATCHES[_a] = _player_read

@@ -24,7 +24,7 @@ static unsigned char expected_save[0x5ee0];static int expected_valid;
 static const char *flag_name(int i){for(unsigned n=0;n<nseed_names;n++)if(seed_names[n].id==i)return seed_names[n].name;switch(i){
 #include "dev_flag_names.inc"
 default:return "UNKNOWN_FLAG";}}
-static int usable(void){return g_ga&&game_version()&&!strcmp(game_version()->key,"v1_0_0")&&game_in_play()&&LD32(GA(LIVE_SAVE))==0xe;}
+static int usable(void){return g_ga&&game_version()&&game_in_play()&&LD32(GA(LIVE_SAVE))==0xe;}
 static int owned(const unsigned char *s,int item,int index){int b=lao_equipment_bit(item),k=lao_key_equipment_bit(item);uint32_t bits=0;if(b>=0){memcpy(&bits,s+0x5568,4);return !!(bits&(1u<<b))&&(!lao_equipment_upgrade(item)||(s[0x555c]&lao_equipment_upgrade(item)));}if(k>=0){memcpy(&bits,s+0x556c,4);return !!(bits&(1u<<k));}
  if(item>=50&&item<=57){memcpy(&bits,s+0x556c,4);return !!(bits&(1u<<(item-43)));}if(item>=120&&item<=122)return !!(s[0x555b]&(1u<<(item-120)));
  int db=lao_reward_dungeon_bit(item);if(db&&index>=0&&index<=9&&index!=8)return !!(s[0xe1+(index==9?18:index*2)*16]&db);
@@ -43,7 +43,7 @@ void lao_dev_item_end(uint64_t id,int item,int count,int index,int handled){
  else dev_events_emit("ITEM","ITEM_VERIFICATION_OVERFLOW",lao_pickup_name(item),item,index,0,handled,"UNVERIFIED","LOCAL_LOG",id);
 }
 void lao_dev_item(int item,int count,int index,int handled){uint64_t id=lao_dev_item_begin(item,count,index);lao_dev_item_end(id,item,count,index,handled);}
-void lao_dev_tick(uint64_t frame){if(!usable()){if(!waiting_logged){const char *reason=!g_ga?"Game addresses not initialized":!game_version()||strcmp(game_version()->key,"v1_0_0")?"Unsupported game version: item ownership adapters require 1.0.0":!game_in_play()?"Waiting for active gameplay":"Waiting for loaded native save";dev_events_emit("LOGGER","GAMEPLAY_OBSERVER_WAITING",reason,0,0,0,0,"NO_GAMEPLAY_OWNERSHIP_CLAIM","LOCAL",0);waiting_logged=1;}if(sampled&&!suspended){dev_events_emit("SCENE","GAMEPLAY_SUSPENDED","Player absent or transition",0,0,1,0,"OBSERVED","LOCAL",0);suspended=1;}return;}
+void lao_dev_tick(uint64_t frame){if(!usable()){if(!waiting_logged){const char *reason=!g_ga?"Game addresses not initialized":!game_version()?"No game version selected":!game_in_play()?"Waiting for active gameplay":"Waiting for loaded native save";dev_events_emit("LOGGER","GAMEPLAY_OBSERVER_WAITING",reason,0,0,0,0,"NO_GAMEPLAY_OWNERSHIP_CLAIM","LOCAL",0);waiting_logged=1;}if(sampled&&!suspended){dev_events_emit("SCENE","GAMEPLAY_SUSPENDED","Player absent or transition",0,0,1,0,"OBSERVED","LOCAL",0);suspended=1;}return;}
  waiting_logged=0;
  if(frame&&frame%3600==0)dev_events_emit("LOGGER","GAMEPLAY_OBSERVER_ACTIVE","Read-only gameplay observation running",0,0,0,0,"RECORDING","LOCAL",0);
  if(suspended){dev_events_emit("SCENE","GAMEPLAY_RESUMED","State observation resumes",0,0,0,1,"OBSERVED","LOCAL",0);suspended=0;}

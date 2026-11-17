@@ -26,7 +26,7 @@ static void look_names(const char *who, uint64_t base) {
     for (unsigned off = 0; off < 512 && hits < 8; off += 8) {
         uint64_t p = look_ptr(base + off);
         if (!((p >= HEAP_BASE && p < HEAP_BASE + HEAP_MAX) ||
-              (p >= MAIN_BASE && p < MAIN_BASE + 0x4000000))) continue;
+              (p >= MAIN_BASE && p < SDK_BASE))) continue;
         char text[65];
         if (look_text(p, text, sizeof text) >= 4 &&
             (strstr(text, "Link") || strstr(text, "link") || strstr(text, ".bfres"))) {
@@ -107,7 +107,7 @@ void laonline_look_end(void) {
 }
 static void look_initialize(Cpu *c) {
     uint64_t obj=c->x[0], archive=0, saved=0, archive_control=0;
-    int ours=look_creating && c->x[30]==MAIN_BASE+0xd07738 &&
+    int ours=look_creating && c->x[30]==GA(LAONLINE_SL_SETUP_RET) &&
              look_ptr(obj)==GA(SHADOW_LINK_VTABLE);
     if (ours) {
         laonline_look_end(); /* shared dispatch is restored before native setup */
@@ -121,13 +121,13 @@ static void look_initialize(Cpu *c) {
         uint64_t result=c->sp;
         ST64(result,0); ST64(result+8,0);
         c->x[0]=result; c->x[1]=local+0x478;
-        guest_call(c,MAIN_BASE+0x57d50);
+        guest_call(c,GA(LAONLINE_RESOURCE_GET));
         archive=look_ptr(result); archive_control=look_ptr(result+8);
         *c=entry;
         uint64_t metadata=look_ptr(archive+0x80);
         /* 1047360(index 0) produces these exact three fields; check them against
          * the model Link actually rendered, rather than assume entry zero is him. */
-        if (!local || local==obj || look_ptr(model)!=MAIN_BASE+0x1c4a060 ||
+        if (!local || local==obj || look_ptr(model)!=GA(LAONLINE_MODEL_COMPONENT_VT) ||
             !archive || !metadata || !look_ptr(model+0x148) ||
             look_ptr(archive+8)!=look_ptr(model+0x168) ||
             look_ptr(archive+0x10)!=look_ptr(model+0x170) ||
@@ -158,10 +158,9 @@ static void look_initialize(Cpu *c) {
     }
 }
 void laonline_look_begin(int enabled,const char *level) {
-    const GameVersion *v=game_version();
-    if (!enabled || !level || !strncmp(level,"Panel",5) || !v || strcmp(v->key,"v1_0_0")) return;
+    if (!enabled || !level || !strncmp(level,"Panel",5) || !g_ga || !GA(LAONLINE_SL_SETUP)) return;
     look_slot=GA(SHADOW_LINK_VTABLE)+0x20;
-    look_original=MAIN_BASE+0xd09e30;
+    look_original=GA(LAONLINE_SL_SETUP);
     if (look_ptr(look_slot)!=look_original) {
         LOG("[laonline] V12 look: initializer fingerprint mismatch; keeping shadow appearance\n"); return;
     }
@@ -197,12 +196,11 @@ void laonline_appearance_clear(void) {
 }
 #ifdef _WIN32
 static int appearance_model(uint64_t actor, unsigned offset, uint64_t *instance, uint64_t *g3d) {
-    const GameVersion *v = game_version();
-    if (!v || strcmp(v->key, "v1_0_0") || !g_ga || !actor) return 0;
+    if (!g_ga || !GA(LAONLINE_MODEL_COMPONENT_VT) || !actor) return 0;
     uint64_t component = look_ptr(actor + offset);
-    if (look_ptr(component) != MAIN_BASE + 0x1c4a060) return 0;
+    if (look_ptr(component) != GA(LAONLINE_MODEL_COMPONENT_VT)) return 0;
     *instance = look_ptr(component + 0x148);
-    if (look_ptr(*instance) != MAIN_BASE + 0x1c47640) return 0;
+    if (look_ptr(*instance) != GA(LAONLINE_MODEL_INSTANCE_VT)) return 0;
     *g3d = look_ptr(look_ptr(*instance + 0x60) + 0x10);
     return *g3d != 0;
 }
@@ -265,11 +263,11 @@ void laonline_appearance_publish(Cpu *c, int id, uint64_t actor, const LaoAppear
     if ((profile->mask & 16) && appearance_meshes(instance, model, bits)) {
         Cpu saved = *c;
         uint64_t component = look_ptr(actor + 0x1640);
-        /* Native shape-index setter: main+104fae0, independently verified from
-         * name setter main+104fa80. Only this owning remote instance is changed. */
+        /* Native shape-index setter (LAONLINE_MESH_SET_VISIBLE), independently verified from
+         * the name setter beside it. Only this owning remote instance is changed. */
         for (unsigned i = 0; i < 20; ++i) if (bits[i] != ((profile->meshes >> i) & 1)) {
             c->x[0] = component; c->x[1] = i; c->x[2] = (profile->meshes >> i) & 1;
-            guest_call(c, MAIN_BASE + 0x104fae0);
+            guest_call(c, GA(LAONLINE_MESH_SET_VISIBLE));
         }
         *c = saved;
     }

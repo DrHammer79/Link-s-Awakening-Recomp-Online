@@ -16,7 +16,7 @@ struct Cpu;
 
 /* game thread */
 void laonline_v12_tick(struct Cpu *c, uint64_t frame, const char *level, const char *room, const float me[3], int have_me);
-int laonline_v12_resource(int item, int count);           /* shared consumables: 1 = applied here (skip AddItem) */
+int laonline_v12_resource(struct Cpu *c, int item, int count);  /* shared consumables: 1 = applied here (skip AddItem) */
 int laonline_v12_hide_puppet(const char *level);          /* last resort (ini): remote Links hidden in the Egg */
 int laonline_v12_ghost_level(const char *level);          /* remote Links visible, all colliders off */
 uint64_t laonline_v12_input(uint64_t buttons, int menu);  /* observes B / R3; never changes the buttons */

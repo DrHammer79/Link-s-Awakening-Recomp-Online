@@ -111,15 +111,22 @@ static const char *level_name(void) {
 }
 
 uint64_t rt_actor_create_fn(uint64_t fn, uint32_t type, uint64_t info) {
-    extern void laonline_boss_spawn_diagnostic(uint32_t,uint64_t);
-    if(info)laonline_boss_spawn_diagnostic(type,LD64(info));
-    {extern void laonline_v12_actor_created(uint32_t,uint64_t);laonline_v12_actor_created(type,info);}  /* V13.5 PvP research (read-only) */
+    {   // online play: a boss's spawn logged, an actor made noted for PvP (read-only: runtime/hle/laonline*.c)
+        extern void laonline_boss_spawn_diagnostic(uint32_t, uint64_t), laonline_v12_actor_created(uint32_t, uint64_t);
+        extern bool laonline_configured(void);
+        if (laonline_configured()) {
+            if (info) laonline_boss_spawn_diagnostic(type, LD64(info));
+            laonline_v12_actor_created(type, info);
+        }
+    }
     extern bool rt_digs_skip_plant(uint32_t type, uint64_t info);  // digsanity: no grass / bush on a dug tile
     if (rt_digs_skip_plant(type, info)) return 0;
     extern bool rt_bush_item_skip(uint32_t type, uint64_t info);  // bushsanity: no item until its bush is cut
     if (rt_bush_item_skip(type, info)) return 0;
     extern bool rt_shell_skip(uint32_t type, uint64_t info);  // Secret Seashell spots (shell_spots.c)
     if (rt_shell_skip(type, info)) return 0;
+    extern bool rt_apple_skip(uint32_t type, uint64_t info);  // Applesanity (apple_trees.c)
+    if (rt_apple_skip(type, info)) return 0;
     extern bool rt_no_buff_actor(uint32_t type);  // no-buff-drops (qol.c): no Piece of Power / Guardian Acorn at all
     if (rt_no_buff_actor(type)) return 0;
     if (g_nsouls < 0) load();
@@ -320,7 +327,7 @@ const char *souls_at(int i, int *kind, bool *owned) {
     return g_souls[i].name;
 }
 
-// V13 (co-op): the event flag of soul i (-1 past the end) - shared with the room like story flags (laonline_v12.c)
+// The event flag of soul i (-1 past the end): online co-op shares it with the room like a story flag (laonline_v12.c).
 int souls_flag_at(int i) {
     if (g_nsouls < 0) load();
     return i >= 0 && i < g_nsouls ? g_souls[i].flag : -1;
