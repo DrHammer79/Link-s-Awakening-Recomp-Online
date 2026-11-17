@@ -81,10 +81,28 @@ void rt_powder_flag_tick(void) {
     LOG("[pots] GetMagicPowder set without the Powder Bag: cleared\n");
 }
 
+static int add_item_impl(Cpu *c);
+
 // x0 item, x1 count, x2 index: returns 1 when handled (AddItem then returns at once)
 int rt_add_item(Cpu *c) {
     extern void rt_silent_add(Cpu *);  // silent_pickups.c: a silent pickup's index back to the real one (+ its fly-in)
     rt_silent_add(c);
+    extern bool laonline_configured(void);
+    if (!laonline_configured()) return add_item_impl(c);
+    // Online play (LA-Online, as his V15.2 has it here): the item - its index put back above - reported to the team as
+    // this player's pickup (laonline_coop.c; not a teammate's grant being applied), and its effect on the save checked by
+    // the journal (laonline_dev_events.c).
+    extern uint64_t lao_dev_item_begin(int, int, int);
+    extern void lao_dev_item_end(uint64_t, int, int, int, int), laonline_coop_pickup(int, int, int);
+    int item = (int)(int32_t)c->x[0], count = (int)(int32_t)c->x[1], index = (int)(int32_t)c->x[2];
+    uint64_t transaction = lao_dev_item_begin(item, count, index);
+    int handled = add_item_impl(c);
+    lao_dev_item_end(transaction, item, count, index, handled);
+    laonline_coop_pickup(item, count, index);
+    return handled;
+}
+
+static int add_item_impl(Cpu *c) {
     int item = (int)(int32_t)c->x[0], count = (int)(int32_t)c->x[1], index = (int)(int32_t)c->x[2];
     extern int triforce_add_item(int item, int index);  // triforce.c: a Triforce piece (Triforce hunt)
     if (triforce_add_item(item, index)) return 1;

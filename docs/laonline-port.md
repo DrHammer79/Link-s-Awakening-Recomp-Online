@@ -57,6 +57,20 @@ your own path 1.5 s late), `host` / `join` (two PCs, direct), `server` (his rela
   `rand()` (never seeded) ^ a variable's address ^ the frame: two copies started alike got the same id and
   each dropped the other's states as its own - direct host / join never connected on one PC
   (`tools/coop_tests/online_net.sh`, 2026-11-17). A fix for him too.
+- `laonline_v12.c`, `laonline_coop.c`: what the team shares is granted through the game's own `AddItem`
+  (`native_grant`), not written into the save (LAS Recomp's review, point 2): the item bits (k_item_bit_id),
+  the capacity upgrades 123..125, the Seashell Sensor 116, golden leaves (23, index = the leaf), the trade
+  step (`trade_item`: 1..12 -> 29..40, 13 / 14 -> 42 / 43, as the game's SetWarashibeItem), the
+  bracelet / shield / sword levels (13/14, 2/3, 0/1), shared rupees and ammo (`laonline_v12_resource`,
+  now given the Cpu), the shared recovery heart (`AddItem` 100). Each checked on 1.0.1 by giving it
+  (`LARECOMP_GIVE_ITEM`) and comparing the save before and after. A grant made this way is a teammate's:
+  `laonline_coop_remote_grant` keeps it from being reported back as this player's pickup. The rupee
+  "undone a frame later" rewrite is gone: an `AddItem` of rupees from the same tick stayed (100 -> 156,
+  kept 5 s); a revert is logged ("shared rupees undone"), not written over. Still writing Link's hearts:
+  PvP damage (`pvp_set_hp`).
+- `keysanity.c` `rt_add_item`: his observer (as V15.2 has it): the item a pickup adds, reported to the team
+  (`laonline_coop_pickup`) and checked by the journal - missing from the first port, so this PC's
+  pickups weren't shared. Behind `laonline_configured`.
 - `laonline_overlay.mm`: no update notice (his updater), no lobby seed keepalive (the lobby), the
   drawn circle for the death-notice portrait (his menu art).
 - Kept byte-identical for compatibility with his players: the seed-share strings
@@ -99,13 +113,10 @@ The rules the review set for this fork's co-op, checked for online play (2026-11
 - **Licence and credit**: MIT (c) ThyHeroOfTime, `LICENSE-LA-Online` (shipped beside `LICENSE`), the
   README's online paragraph, and the log's `[fork]` line names it.
 
+- **Save safety** (point 2): shared items, levels, rupees, ammo and recovery hearts through the game's
+  `AddItem` (above). Left: PvP damage writes Link's hearts (`pvp_set_hp`).
+
 Still open, his to decide (asked 2026-11-17):
 
-- **Save safety** (point 2): `laonline_v12.c`'s shared items write the live save directly - the item bits
-  (`ITEMS`), bombs / arrows / powder set to 10, the capacity upgrades, the Seashell Sensor, golden leaves,
-  the trade item, rupees. `laonline_coop.c` already grants through the game's `AddItem` (`ADD_ITEM`,
-  main+0x7e18b0 on 1.0.1: item id, count, index, auto-equip), and story flags go through `flags_put`;
-  moving the shared items there too is the change (rupees need another place than the hook: an `AddItem`
-  from it was undone a frame later, his note).
 - **Several local players per PC**: each PC sends only its Player 1 (`GAME_MGR+0x4b8`); PvP and
   Z-targeting act for him alone.
