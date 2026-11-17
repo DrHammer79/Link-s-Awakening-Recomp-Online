@@ -25,6 +25,7 @@ using LobbySocket = int;
 #define lobby_close close
 #endif
 #include <SDL3/SDL.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +39,7 @@ using LobbySocket = int;
 #include <vector>
 #include "imgui.h"
 #include "i18n.h"
+#include "plastic.h"  // (the menu's tab colours: the tab row)
 #include "laonline_seed_share.h"
 extern "C" {
 #include "../rt.h"  // (LOG, rt_request_reboot, g_romfs_dir)
@@ -317,9 +319,15 @@ static void request(int action, const std::string &code = "", bool ready = false
 
 static std::string my_name(const Directory &d) { return !d.self_name.empty() ? d.self_name : g_name[0] ? g_name : "Player"; }
 
+// A room being left: no longer this player's from the moment he leaves - not only once the relay's answer comes, a
+// few frames later: in between, the room still listed as started (and this player not in it any more) began the
+// session again, so he stayed online in its lobby (online_flows.sh).
+static std::string g_leaving;  // (render thread) its code, until the answer clears it
+static bool in_room_of(const Directory &d) { return !d.token.empty() && !d.rooms.empty() && d.rooms[0].code != g_leaving; }
+
 // Leaving the room ends online play in it too.
 static void leave(const Directory &d) {
-    if (!d.rooms.empty()) request(7, d.rooms[0].code);
+    if (!d.rooms.empty()) g_leaving = d.rooms[0].code, request(7, d.rooms[0].code);
     if (g_launched) {
         laonline_launch_mode(0);
         laonline_session_override(nullptr, nullptr, nullptr);
@@ -350,28 +358,42 @@ static void try_launch(const Directory &d, const Room &room) {
 
 static void global_join(void);
 static void board_test(void);
-// (test) LAONLINE_TEST_LOBBY=host | host-public | join:<code> | browse | global | board: what a player would press,
-// once a save is loaded - then Ready, and the host starts the session once every player (2 or more) is ready; global:
-// Join Global; board: a run submitted, then the leaderboard read (tools/coop_tests/online_lobby.sh, online_global.sh).
-// The same requests the page's buttons make.
+// (test) LAONLINE_TEST_LOBBY=<word>[,<word>...]: what a player would press, once a save is loaded. host | host-public |
+// join:<code> | browse: into a session - then Ready, and the host starts it once every player (2 or more) is ready;
+// global: Join Global; board: a run submitted, then the leaderboard read; then-global: 15 s after the session began,
+// Join Global (leaving the session). tools/coop_tests/online_lobby.sh, online_global.sh, online_flows.sh. The same
+// requests the page's buttons make.
+static const char *plan_word(const char *plan, const char *word) {  // (the word in the list, or its "<word>:" form)
+    size_t n = strlen(word);
+    for (const char *p = plan; p && *p; p = strchr(p, ',') ? strchr(p, ',') + 1 : NULL)
+        if (!strncmp(p, word, n) && (p[n] == ',' || p[n] == 0 || (word[n - 1] == ':'))) return p + n;
+    return NULL;
+}
 static void test_drive(const Directory &d) {
     static const char *plan = getenv("LAONLINE_TEST_LOBBY");
-    static uint64_t at;
-    bool in_room = !d.token.empty() && !d.rooms.empty();
+    static uint64_t at, began_at;
+    bool in_room = in_room_of(d);
     // (a save loaded before the first press; in a room Ready and Start go on from the title too - a joiner switched
     // to the host's seed is back at its title, as a player would be, who then presses Ready there or in his save)
     if (!plan || (!in_room && !game_in_play()) || g_busy.load() || now_ms() < at) return;
     at = now_ms() + 1500;
-    if (strstr(plan, "global") || strstr(plan, "board")) {  // (either, or both: "global,board")
-        if (strstr(plan, "global") && laonline_launch_choice() != 3) global_join();
-        if (strstr(plan, "board")) board_test();
+    if (plan_word(plan, "global") || plan_word(plan, "board")) {  // (either, or both: "global,board")
+        if (plan_word(plan, "global") && laonline_launch_choice() != 3) global_join();
+        if (plan_word(plan, "board")) board_test();
+        return;
+    }
+    if (laonline_launch_choice() == 3) return;  // (in Global: done)
+    if (plan_word(plan, "then-global") && g_launched) {
+        if (!began_at) began_at = now_ms();
+        else if (now_ms() - began_at > 15000) global_join();
         return;
     }
     if (!in_room) {
-        if (!strcmp(plan, "host")) request(1);
-        else if (!strcmp(plan, "host-public")) request(2);
-        else if (!strncmp(plan, "join:", 5)) request(3, plan + 5);
-        else if (!strcmp(plan, "browse")) {
+        const char *code = plan_word(plan, "join:");
+        if (plan_word(plan, "host")) request(1);
+        else if (plan_word(plan, "host-public")) request(2);
+        else if (code) request(3, std::string(code, strcspn(code, ",")));
+        else if (plan_word(plan, "browse")) {
             Directory list;
             { std::lock_guard<std::mutex> lock(g_lock); list = g_listing; }
             if (list.rooms.empty()) request(0);
@@ -505,8 +527,9 @@ extern "C" void laonline_lobby_frame(void) {
         g_acting = false;
         request(run.action, run.code, run.ready, run.page, run.named ? run.name.c_str() : nullptr);
     }
+    if (!g_leaving.empty() && (d.token.empty() || d.rooms.empty() || d.rooms[0].code != g_leaving)) g_leaving.clear();
     test_drive(d);
-    bool in_room = !d.token.empty() && !d.rooms.empty();
+    bool in_room = in_room_of(d);
     if (!in_room) return;
     const Room &room = d.rooms[0];
     {   // (the test's log: each change of the room)
@@ -922,20 +945,25 @@ static void board_view(float s) {
     static const char *modes[] = {"Vanilla", "Co-op", "Co-op Randomizer", "All modes"};  // (the relay's: 0, 1, 2; 3 all)
     static const char *counts[] = {"Any number of players", "1 player", "2 players", "3 players", "4 players"};
     bool changed = false;
+    auto widest = [](const char *const *names, int n) {  // (a combo as wide as its longest choice, and its arrow)
+        float w = 0;
+        for (int i = 0; i < n; i++) w = fmaxf(w, ImGui::CalcTextSize(L(names[i])).x);
+        return w + ImGui::GetStyle().FramePadding.x * 2 + ImGui::GetFrameHeight();
+    };
     ImGui::BeginDisabled(busy);
-    ImGui::SetNextItemWidth(170 * s);
+    ImGui::SetNextItemWidth(widest(sorts, 4));
     if (ImGui::BeginCombo("##sort", L(sorts[g_board_sort]))) {
         for (int i = 0; i < 4; i++) if (ImGui::Selectable(L(sorts[i]), g_board_sort == i)) changed |= g_board_sort != i, g_board_sort = i;
         ImGui::EndCombo();
     }
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(200 * s);
+    ImGui::SetNextItemWidth(widest(modes, 4));
     if (ImGui::BeginCombo("##mode", L(modes[g_board_mode]))) {
         for (int i : {3, 0, 1, 2}) if (ImGui::Selectable(L(modes[i]), g_board_mode == i)) changed |= g_board_mode != i, g_board_mode = i;
         ImGui::EndCombo();
     }
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(220 * s);
+    ImGui::SetNextItemWidth(widest(counts, 5));
     if (ImGui::BeginCombo("##count", L(counts[g_board_count]))) {
         for (int i = 0; i < 5; i++) if (ImGui::Selectable(L(counts[i]), g_board_count == i)) changed |= g_board_count != i, g_board_count = i;
         ImGui::EndCombo();
@@ -1014,15 +1042,27 @@ extern "C" void laonline_lobby_draw(float scale) {
     }
     Directory d;
     { std::lock_guard<std::mutex> lock(g_lock); d = g_member; }
-    if (!d.token.empty() && !d.rooms.empty()) { room_view(d, scale); return; }  // (in a session: its room alone)
+    if (in_room_of(d)) { room_view(d, scale); return; }  // (in a session: its room alone)
+    static const char *test_tab = getenv("LAONLINE_TEST_TAB");  // (test: global | board - the page opens on that tab)
+    static bool tab_once;
+    auto first = [&](const char *t) { return !tab_once && test_tab && !strcmp(test_tab, t) ? ImGuiTabItemFlags_SetSelected : 0; };
+    const PlasticTheme &pt = plastic_theme();  // (the bar's and Settings' tab colours)
+    ImGui::PushStyleColor(ImGuiCol_Tab, pt.tab);
+    ImGui::PushStyleColor(ImGuiCol_TabHovered, pt.tab_hot);
+    ImGui::PushStyleColor(ImGuiCol_TabSelected, pt.tab_sel);
+    ImGui::PushStyleColor(ImGuiCol_TabSelectedOverline, pt.tab_sel);
+    ImGui::PushStyleVar(ImGuiStyleVar_TabRounding, 8 * scale);
     if (ImGui::BeginTabBar("##online")) {
         if (ImGui::BeginTabItem(L("Sessions"))) {
             if (g_browsing) browser_view(scale);
             else start_view(d, scale);
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem(L("Global"))) { global_view(scale); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem(L("Leaderboards"))) { board_view(scale); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem(L("Global"), NULL, first("global"))) { global_view(scale); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem(L("Leaderboards"), NULL, first("board"))) { board_view(scale); ImGui::EndTabItem(); }
+        tab_once = true;
         ImGui::EndTabBar();
     }
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(4);
 }

@@ -80,7 +80,7 @@ void laonline_resume_launch_mode(void){atomic_store(&g_launch_online,g_launch_re
 void laonline_launch_mode(int enabled) {
     g_launch_requested=enabled;atomic_fetch_add(&g_launch_epoch,1);
     atomic_store(&g_launch_online, enabled);
-    LOG("[laonline] launch mode=%s\n", enabled ? "co-op" : "offline");
+    LOG("[laonline] launch mode=%s\n", enabled == 3 ? "global" : enabled == 2 ? "co-op randomizer" : enabled ? "co-op" : "offline");
 }
 /* Boss type IDs 0x62..0x6a are the nine bosses in upstream
  * tools/rando/souls.py. This observes a factory request, never claims HP/death. */
@@ -1167,7 +1167,7 @@ static void *srv_thread(void *arg) {
         n += put_str(buf + n, LAO_MOD_VERSION);
         buf[0] = (uint8_t)(n - 2), buf[1] = (uint8_t)((n - 2) >> 8);
         if (!send_all(s, buf, n)) { sock_close(s); sleep_ms(3000); continue; }
-        LOG("[laonline] server: connected to %s:%s as '%s' (lobby %s, tunic #%06x)\n", host, port, login_name, login_lobby, rgb);
+        LOG("[laonline] server: connected to %s:%s as '%s' (lobby %s, tunic #%06x)\n", host, port, login_name, session_lobby, rgb);
         static uint8_t rb[70000];
         int have = 0;
         uint64_t ping_at = now_ms();

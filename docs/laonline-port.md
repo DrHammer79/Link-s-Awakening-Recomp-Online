@@ -59,7 +59,9 @@ your own path 1.5 s late), `host` / `join` (two PCs, direct), `server` (his rela
   `docs/laonline-protocol.md` 6a) as he wrote it - the requests, the 2 s room poll, a press during a poll sent after
   it, the rejoin token. Changed: a page of the game's menu (`menu.mm`: the bar's Online entry, tab 12, shown only while
   online play is set up), drawn with the menu's widgets; the room polled each frame the game draws
-  (`laonline_lobby_frame`), so a session the host starts begins with the menu closed too; the seed a Co-op
+  (`laonline_lobby_frame`), so a session the host starts begins with the menu closed too; a room being left is
+  no longer this player's from that moment (`g_leaving`), not once the relay's answer comes - in between, the room
+  still listed as started began the session again (`tools/coop_tests/online_flows.sh`); the seed a Co-op
   Randomizer room needs is the one being played (his launcher downloaded a missing one: not taken - the page says to
   play the host's seed - taken since: below). `laonline_lobby_config` gives it the ini's name and relay.
   `tools/coop_tests/online_lobby.sh`.
@@ -172,7 +174,7 @@ The rules the review set for this fork's co-op, checked for online play (2026-11
 - **General fixes as their own changes** (point 5): `imgui_glue.cpp` (UI images freed with their context,
   an image leaked when its view failed) is its own commit, for upstream on its own.
 - **Tests in the repository** (point 9): `tools/coop_tests/online.sh`, `online_net.sh`, `online_relay.sh`,
-  `online_lobby.sh`, `online_pvp.sh`, `online_global.sh`, `online_seed.sh`.
+  `online_lobby.sh`, `online_pvp.sh`, `online_global.sh`, `online_seed.sh`, `online_flows.sh`, `online_soak.sh`.
 - **Mobile** (point 10): the menu / pause check above now runs off Windows too.
 - **Licence and credit**: MIT (c) ThyHeroOfTime, `LICENSE-LA-Online` (shipped beside `LICENSE`), the
   README's online paragraph, and the log's `[fork]` line names it.
