@@ -21,7 +21,8 @@ your own path 1.5 s late), `host` / `join` (two PCs, direct), `server` (his rela
   menu's **Online** page, `runtime/ui/laonline_lobby.mm` - its relay protocol and rules as he wrote them, drawn with
   the menu's own widgets, in the game instead of before it (below).
 - **Not taken:** his start screen and menus (`launcher.mm`, `menu.mm` tabs, `tropical_ui`,
-  `v10_ui`, `settings_look`, `settings_reset`; Global and the leaderboards are tabs of the Online page instead), the self-updater
+  `v10_ui`, `settings_look`, `settings_reset`; Global and the leaderboards are tabs of the Online page instead, its seed
+  picker the Randomizer page), the self-updater
   (`lao_updater`, `release_updates.h`), log upload and the report screen (`laonline_logs`,
   `laonline_report`, `laonline_report_send`), the D-pad shortcuts, his artwork, and his randomizer
   tracker fixes in `tracker_overlay.mm` (missing logic rooms, checks without a collected flag, the
@@ -60,7 +61,16 @@ your own path 1.5 s late), `host` / `join` (two PCs, direct), `server` (his rela
   online play is set up), drawn with the menu's widgets; the room polled each frame the game draws
   (`laonline_lobby_frame`), so a session the host starts begins with the menu closed too; the seed a Co-op
   Randomizer room needs is the one being played (his launcher downloaded a missing one: not taken - the page says to
-  play the host's seed). `laonline_lobby_config` gives it the ini's name and relay. `tools/coop_tests/online_lobby.sh`.
+  play the host's seed - taken since: below). `laonline_lobby_config` gives it the ini's name and relay.
+  `tools/coop_tests/online_lobby.sh`.
+- A Co-op Randomizer room's seed (his V13 / V15.2): his `tools/rando/lao_seed_transfer.py` as he wrote it, run by
+  the seed generator's helper (`tools/rando/las_headless.py` hands it `--lao-*`, as his did). The host's game uploads
+  the room's seed while hosting (his keepalive: 15 s after the room is known, every minute for 10 minutes, then every
+  5); a joiner's downloads it (every 20 s until it is there) and switches to it (`rando_select` + the in-place reboot,
+  as the Randomizer page does) - the room stays joined through the reboot, and the session begins once the seed
+  matches. The package is patches against each player's own game files; no game file travels.
+  `tools/coop_tests/online_seed.sh` (the helper's export / import round trip, and the game's upload, download and
+  switch). Seeds from this build's generator have every file his helper checks for (`tracker.tsv`, `flags.tsv`, ...).
   Two more tabs, his start screen's: **Global** (Join / Leave Global: launch mode 3 with his variant - Global
   Randomizer while a seed is played - and the player count, relay 0x33) and **Leaderboards** (the completed runs,
   filters, pages, Submit a run: relay 0x32, his V12 fallback kept). `tools/coop_tests/online_global.sh`.
@@ -162,7 +172,7 @@ The rules the review set for this fork's co-op, checked for online play (2026-11
 - **General fixes as their own changes** (point 5): `imgui_glue.cpp` (UI images freed with their context,
   an image leaked when its view failed) is its own commit, for upstream on its own.
 - **Tests in the repository** (point 9): `tools/coop_tests/online.sh`, `online_net.sh`, `online_relay.sh`,
-  `online_lobby.sh`, `online_pvp.sh`, `online_global.sh`.
+  `online_lobby.sh`, `online_pvp.sh`, `online_global.sh`, `online_seed.sh`.
 - **Mobile** (point 10): the menu / pause check above now runs off Windows too.
 - **Licence and credit**: MIT (c) ThyHeroOfTime, `LICENSE-LA-Online` (shipped beside `LICENSE`), the
   README's online paragraph, and the log's `[fork]` line names it.

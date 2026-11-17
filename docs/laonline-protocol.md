@@ -374,6 +374,24 @@ Both like section 6a: a connection of their own, one frame each way, the answer'
   rupees, u32 deaths, u8 (unused)`; the score is then worked out by the client: 100,000 - seconds - 250 x deaths +
   rupees, at least 0.
 
+## 6c. A Co-op Randomizer room's seed (0x16 / 0x17 / 0x18) [code]
+
+Sent by the seed generator's helper (`tools/rando/lao_seed_transfer.py`, his; started by the Online page), each
+transfer on a connection of its own; the frames as in section 1, a frame's body at most 4096 bytes.
+`credentials` = `str name, str lobby (the room's, 26 bytes at most, + ".rando"), str password`.
+
+- **Upload** (the host's game): `16, 01, credentials, world checksum (32), u32 size, sha256 (32)`; the relay answers
+  `9D 01` (go on), then `17, data` chunks of 4000 bytes, then `18`; the relay answers `9D 01` when the size and
+  sha256 match (the package kept for that lobby), anything else = refused.
+- **Download** (a joiner's game): `16, 00, credentials`; the relay answers `9D 01, u32 size, sha256 (32)` (38 bytes)
+  when it has the lobby's package, then `9E, data` chunks, then `9F`; anything else = "not there yet" (retried).
+
+The package is a zip: `manifest.json` (format LAO-WORLD-PATCH-1, the seed's ID, name and world checksum, one entry per
+file) and, for each of the seed's `romfs/` files, its bytes XOR the matching file of the receiver's own game (named
+by path and sha256 - no game file travels), the seed's own small files (`settings.json`, the `.tsv` tables, ...) as
+they are. The receiver rebuilds the seed from its own game files and checks each file's sha256 and the whole world's
+checksum; an exact world already there is reused.
+
 ## 7. Server behaviour the client expects
 
 | # | Behaviour | Basis |

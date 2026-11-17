@@ -13,6 +13,7 @@ stdout ("join", "leave", "flag", "item", "pickup", "reward", ...), which the tes
 library only. Ctrl+C stops it.
 """
 import asyncio
+import hashlib
 import secrets
 import struct
 import sys
@@ -435,6 +436,57 @@ def board(b):
     return bytes([0]) + put_str(b'Unknown request.')
 
 
+# ---------------------------------------------------------------- a Co-op Randomizer room's seed (0x16 / 0x17 / 0x18):
+# the host's game uploads it, a joiner's downloads it (tools/rando/lao_seed_transfer.py: verified patches against each
+# player's own game files). Kept per lobby ("<room lobby>.rando") with the uploader's password; given only with it.
+seeds = {}  # lobby -> (password, package, sha256)
+
+
+async def read_frame(reader):
+    (n,) = struct.unpack('<H', await reader.readexactly(2))
+    return await reader.readexactly(n)
+
+
+async def seed_transfer(reader, writer, b):
+    o = 2
+    fields = []
+    for _ in range(3):  # name, lobby, password
+        n = b[o]; fields.append(bytes(b[o + 1:o + 1 + n])); o += 1 + n
+    name, lobby, password = fields
+    if b[1] == 1:  # upload: world checksum, u32 size, sha256; then chunks (0x17), then the end (0x18)
+        o += 32
+        (size,) = struct.unpack_from('<I', b, o)
+        digest = bytes(b[o + 4:o + 36])
+        writer.write(frame(b'\x9d\x01'))
+        await writer.drain()
+        data = bytearray()
+        while True:
+            f = await read_frame(reader)
+            if f[0] == 0x17:
+                data += f[1:]
+            elif f[0] == 0x18:
+                break
+        ok = len(data) == size and hashlib.sha256(data).digest() == digest
+        if ok:
+            seeds[lobby] = (password, bytes(data), digest)
+        log(f'seed upload {lobby.decode(errors="replace")} by {name.decode(errors="replace")}: {size} bytes'
+            f'{"" if ok else " REJECTED"}')
+        writer.write(frame(b'\x9d' + bytes([1 if ok else 0])))
+    else:  # download: u32 size + sha256, the package in chunks (0x9E), the end (0x9F)
+        got = seeds.get(lobby)
+        if not got or got[0] != password:
+            writer.write(frame(b'\x9d\x00'))
+            log(f'seed download {lobby.decode(errors="replace")} by {name.decode(errors="replace")}: none yet')
+        else:
+            data = got[1]
+            writer.write(frame(b'\x9d\x01' + struct.pack('<I', len(data)) + got[2]))
+            for i in range(0, len(data), 4000):
+                writer.write(frame(b'\x9e' + data[i:i + 4000]))
+            writer.write(frame(b'\x9f'))
+            log(f'seed download {lobby.decode(errors="replace")} by {name.decode(errors="replace")}: {len(data)} bytes')
+    await writer.drain()
+
+
 async def client(reader, writer):
     p = Player(writer)
     try:
@@ -444,6 +496,9 @@ async def client(reader, writer):
             if n == 0:
                 continue
             b = await reader.readexactly(n)
+            if p.lobby is None and b[0] == 0x16:  # (a seed transfer: its own connection)
+                await seed_transfer(reader, writer, b)
+                break
             if p.lobby is None and b[0] in (0x30, 0x32, 0x33):  # (one answer, then the connection closes)
                 body = bytes([b[0] + 0x80]) + (session(b[1:]) if b[0] == 0x30 else board(b[1:]) if b[0] == 0x32
                                                else global_count())

@@ -96,8 +96,9 @@ chat, PvP and Z-targeting. Thank you for it. Here it runs on game 1.0.0 and 1.0.
   it weren't there.
 - **Play:** the menu (F1, or Minus + Plus) has an **Online** page. Host a private session (a room code to give your
   friends) or a public one, or join one by its code or from the list of public sessions. Everyone presses Ready and
-  the host starts it. While a randomizer seed is played, the session is a Co-op Randomizer one on that seed (the others
-  play the same seed). Leaving the session on the page ends online play.
+  the host starts it. While a randomizer seed is played, the session is a Co-op Randomizer one on that seed: the
+  host's game sends it to the others' through the relay - as patches against each player's own game files, no game
+  files sent - and their games switch to it. Leaving the session on the page ends online play.
 - **Global** (the Online page's Global tab): everyone playing online at once, each in their own world - your own
   save, and your own seed while you play one - seen together, with PvP and the kill feed.
 - **Leaderboards** (its Leaderboards tab): the completed runs players reported, by time, score, rupees or deaths;
@@ -465,7 +466,7 @@ nothing for Nintendo's game, which you must supply yourself.
 
 This fork's online play (`runtime/hle/laonline*`, `runtime/hle/ztarget.c`, `runtime/hle/dev_flag_names.inc`,
 `runtime/dev_events.*`, `runtime/laonline_*`, `runtime/nvn/pool_registry.h`, `runtime/ui/laonline_*`,
-`runtime/ui/lao_icons.h`, `runtime/ui/coop_version.h`) is LegendarySavageGamer's LA-Online, also MIT: its notice is in
+`runtime/ui/lao_icons.h`, `runtime/ui/coop_version.h`, `tools/rando/lao_seed_transfer.py`) is LegendarySavageGamer's LA-Online, also MIT: its notice is in
 [LICENSE-LA-Online](LICENSE-LA-Online).
 
 ### Source code of bundled third-party components

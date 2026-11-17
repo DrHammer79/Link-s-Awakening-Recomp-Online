@@ -14,6 +14,13 @@ import re
 import sys
 import types
 
+# Online play (LA-Online, MIT (c) ThyHeroOfTime): a Co-op Randomizer room's seed sent to / taken from the relay, or
+# exported / imported as a .laoseed file - verified patches against the player's own game files, no shuffler run
+# (tools/rando/lao_seed_transfer.py; runtime/ui/laonline_lobby.mm). As his V15.2 has it.
+if len(sys.argv) > 1 and sys.argv[1] in ('--lao-export', '--lao-import', '--lao-publish', '--lao-sync'):
+    import lao_seed_transfer
+    sys.exit(lao_seed_transfer.main(sys.argv[1:]))
+
 # Game files copied from a Mac to a drive that isn't its own (an SD card, exFAT) carry a hidden ._<name> beside each
 # file. They aren't the game's, but every folder listing here took them for its files: the room shuffle read
 # ._Lv07EagleTower.bntx as a dungeon's textures and failed. One filter for every listing (tools/rando and LAS-Randomizer).
