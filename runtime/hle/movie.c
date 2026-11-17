@@ -241,8 +241,9 @@ static void ex_set_data_source(Cpu *c) {
     if (e->skippable) g_skip_pressed_at = 0;  // (a press that ended the title's attract replay isn't for this one)
     if (rel && strstr(rel, "movie/ending.webm")) {  // the run's end; online play tells the others ("X saved Koholint!")
         extern void run_timer_ending_movie(void), laonline_v12_ending(void);
+        extern bool laonline_configured(void);
         run_timer_ending_movie();
-        laonline_v12_ending();
+        if (laonline_configured()) laonline_v12_ending();
     }
     if (rel && strstr(rel, "movie/title.webm")) { extern void run_timer_title(void); run_timer_title(); }  // (a new attempt next)
     for (unsigned i = 0; i < e->fmt->nb_streams && e->ntracks < 16; i++)

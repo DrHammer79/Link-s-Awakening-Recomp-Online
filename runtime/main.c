@@ -360,7 +360,12 @@ int main(int argc, char **argv) {
         extern bool load_save_prepare(void);
         if (load_save_prepare()) skip_launcher = true;
     }
-    { extern void dev_events_init(void); dev_events_init(); }  // (online play's diagnostic journal, in the data root)
+    {   // online play (laonline.c): set up or not, worked out here before the other threads start; only then its
+        // diagnostic journal, in the data root
+        extern bool laonline_configured(void);
+        extern void dev_events_init(void);
+        if (laonline_configured()) dev_events_init();
+    }
     if (getenv("LARECOMP_MENU_SFX_TEST")) {  // (test: the menu sounds loaded now, each logged)
         extern void menu_sfx_set_game_dir(const char *dir);
         extern void menu_sfx_load_now(void);

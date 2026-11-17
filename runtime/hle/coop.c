@@ -38,8 +38,8 @@
 // isn't upstream's: a co-op bug filed on upstream's issues by mistake is told from its log at once, and sent here.
 #define COOP_FORK_VERSION "0.1.0"
 const char *coop_fork_name(void) {
-    return "LAS Recomp Co-Op " COOP_FORK_VERSION ", a fork of LAS Recomp with local co-op - report its bugs at "
-           "https://github.com/DrHammer79/LASRecomp/issues";
+    return "LAS Recomp Co-Op " COOP_FORK_VERSION ", a fork of LAS Recomp with local co-op and LA-Online's online play "
+           "(V15.2) - report its bugs at https://github.com/DrHammer79/LASRecomp/issues";
 }
 
 // Players join and leave in play (drop-in co-op): player i + 1 is in the game while bit i of g_joined is set (bit 0,

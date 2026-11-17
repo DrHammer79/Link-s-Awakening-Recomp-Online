@@ -1044,7 +1044,8 @@ SHADOW_LINK_BGM_SITE = A.SHADOW_LINK_BGM_SITE
 # update's entry (sub sp, sp, #0x40) asks laonline_native_shadow_update first, which skips the rest of it for such a
 # puppet - his targeting, his choices, his reactions to hits - while his model and animation components still update;
 # the animation player's entry (sub sp, sp, #0x60) lets laonline_native_animation see each animation played (the local
-# Link's are sent, the remote player's played on his puppet). The Game Over event just submitted (ldr x20, [sp, #0x18],
+# Link's are sent, the remote player's played on his puppet). Both only with online play set up (g_laonline_on:
+# laonline.c laonline_configured), as is the Game Over hook. The Game Over event just submitted (ldr x20, [sp, #0x18],
 # after Common.bfevfl GameOver's EventManager::Submit) tells the others (laonline_death.c).
 LAONLINE_GAMEOVER_SITE = A.LAONLINE_GAMEOVER_SITE
 
@@ -1052,14 +1053,16 @@ LAONLINE_GAMEOVER_SITE = A.LAONLINE_GAMEOVER_SITE
 def _laonline_shadow_update(gen, a):
     w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
     assert w == 0xd10103ff, hex(w)  # sub sp, sp, #0x40
-    return ('{ extern int laonline_native_shadow_update(Cpu *); if (laonline_native_shadow_update(c)) return; '
+    return ('{ extern _Bool g_laonline_on; extern int laonline_native_shadow_update(Cpu *); '
+            'if (g_laonline_on && laonline_native_shadow_update(c)) return; '
             f'c->sp -= 0x40; }}  /* {a:#x}: sub sp, sp, #0x40 (Shadow Link update: online play\'s puppet) */')
 
 
 def _laonline_animation(gen, a):
     w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
     assert w == 0xd10183ff, hex(w)  # sub sp, sp, #0x60
-    return ('{ extern void laonline_native_animation(Cpu *); laonline_native_animation(c); c->sp -= 0x60; }'
+    return ('{ extern _Bool g_laonline_on; extern void laonline_native_animation(Cpu *); '
+            'if (g_laonline_on) laonline_native_animation(c); c->sp -= 0x60; }'
             f'  /* {a:#x}: sub sp, sp, #0x60 (an animation played: online play) */')
 
 

@@ -166,7 +166,11 @@ static void scan_tick(uint64_t frame) {
 
 static void shadow_link_seen(uint64_t o);
 void rt_mb_seen(uint64_t o) {
-    { extern void ztarget_actor_seen(uint64_t); ztarget_actor_seen(o); }  // (Z-targeting's actors around Link: ztarget.c)
+    {   // (Z-targeting's actors around Link, with online play: ztarget.c)
+        extern bool laonline_configured(void);
+        extern void ztarget_actor_seen(uint64_t);
+        if (laonline_configured()) ztarget_actor_seen(o);
+    }
     uint64_t vt = LD64(o);
     if (vt == GA(SHADOW_LINK_VTABLE)) shadow_link_seen(o);
     if (ENV("LARECOMP_MB_LOG")) log_new_vtable(o, vt);

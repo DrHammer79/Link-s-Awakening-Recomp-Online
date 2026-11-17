@@ -88,6 +88,14 @@ join it through a game-streaming service that passes their controllers through a
 they see the host's screen and play on their own Link. Each friend's controller counts as one of the host's
 (on Windows, 4 Xbox-type controllers at most). Lag is the stream's.
 
+**Online play (LA-Online, experimental):** this build also carries the online core of
+[LA-Online](https://github.com/LegendarySavageGamer/Link-s-Awakening-Recomp-Online) by LegendarySavageGamer
+(ThyHeroOfTime), from its V15.2, moved to game 1.0.1: players on other PCs appear in your game as their own Links,
+with shared story progress and items, chat, PvP and Z-targeting. Thank you for it. It is off unless a `laonline.ini`
+in the data folder sets a mode; without one the game runs as if it weren't there. Only each PC's Player 1 is sent to
+the others for now. What came over and what changed: [docs/laonline-port.md](docs/laonline-port.md). Report its bugs
+here too, saying it was online.
+
 **Bugs:** co-op isn't part of upstream, so report co-op bugs on
 [this fork's Issues](https://github.com/DrHammer79/LASRecomp/issues), not peiikai's. Say how many players, where in the
 game and what happened, and attach `lasrecomp.log` from the data folder (where it is: under Building from source).
@@ -437,6 +445,11 @@ folder carries each one's licence text, its sources are this repository plus the
 libraries can be relinked: `make deps-ios` builds them from source, `make ipa` the app), and the game code library it
 embeds is built from the player's own game files and never shared. The license covers LAS Recomp's code only - it grants
 nothing for Nintendo's game, which you must supply yourself.
+
+This fork's online play (`runtime/hle/laonline*`, `runtime/hle/ztarget.c`, `runtime/hle/dev_flag_names.inc`,
+`runtime/dev_events.*`, `runtime/laonline_*`, `runtime/nvn/pool_registry.h`, `runtime/ui/laonline_*`,
+`runtime/ui/lao_icons.h`, `runtime/ui/coop_version.h`) is LegendarySavageGamer's LA-Online, also MIT: its notice is in
+[LICENSE-LA-Online](LICENSE-LA-Online).
 
 ### Source code of bundled third-party components
 

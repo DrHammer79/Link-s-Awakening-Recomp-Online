@@ -887,8 +887,9 @@ void input_handle_event(const SDL_Event *e) {
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
         if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) g_debug_frame_request = 1;
-        if (e->key.scancode >= SDL_SCANCODE_F6 && e->key.scancode <= SDL_SCANCODE_F8) {  // online play: F6 PvP on / off,
-            extern void laonline_v12_key(int, int, int);                                // F7 the dive assist, F8 lock-on
+        extern bool laonline_configured(void);
+        if (e->key.scancode >= SDL_SCANCODE_F6 && e->key.scancode <= SDL_SCANCODE_F8 && laonline_configured()) {
+            extern void laonline_v12_key(int, int, int);  // online play: F6 PvP on / off, F7 the dive assist, F8 lock-on
             laonline_v12_key(6 + (e->key.scancode - SDL_SCANCODE_F6), e->type == SDL_EVENT_KEY_DOWN, e->key.repeat);
         }
         if (e->type == SDL_EVENT_KEY_DOWN && (e->key.scancode == SDL_SCANCODE_F10 || e->key.scancode == SDL_SCANCODE_BACKSLASH) && !e->key.repeat) g_interp_ring_request = 1;
@@ -1438,8 +1439,9 @@ static void fill_state(Cpu *c) {
         extern uint64_t load_save_buttons(void);
         b |= load_save_buttons();
     }
-    {   // online play, on this PC's Player 1 (runtime/hle/laonline_v12.c, ztarget.c): B and R3 seen for PvP and the dive
-        // assist, ZL as Z-targeting
+    extern bool laonline_configured(void);
+    if (laonline_configured()) {  // online play, on this PC's Player 1 (runtime/hle/laonline_v12.c, ztarget.c): B and R3
+                                  // seen for PvP and the dive assist, ZL as Z-targeting
         extern uint64_t laonline_v12_input(uint64_t, int), ztarget_input(uint64_t, int);
         b = laonline_v12_input(b, menu);
         b = ztarget_input(b, menu);
@@ -1447,7 +1449,8 @@ static void fill_state(Cpu *c) {
     int32_t tlx, tly;
     touch_stick(&tlx, &tly);
     int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + tlx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + tly) + script_ly);
-    if (!menu) {  // online play: a PvP hit staggers (the stick held still), Z-targeting circles the target
+    if (!menu && laonline_configured()) {  // online play: a PvP hit staggers (the stick held still), Z-targeting
+                                           // circles the target
         extern int laonline_v12_stagger(void);
         extern void ztarget_stick(int32_t *, int32_t *);
         if (laonline_v12_stagger()) lx = ly = 0;

@@ -300,6 +300,8 @@ static int player_component_missing(void) {
     return !o || !LD64(o + 0x618);
 }
 
+bool laonline_configured(void);  // runtime/hle/laonline.c: online play set up (laonline.ini / LAONLINE_MODE)
+
 // Online play (runtime/hle/laonline.c): the level is ready for remote players' Links - in play, no level change of
 // the game's own or a warp pending, the player component there, and WARP_SETTLE frames since the last load, as a warp
 // waits for.
@@ -784,8 +786,8 @@ static void actor_scan_tick(uint64_t frame) {
 void give_item_tick(Cpu *c, uint64_t frame) {
     actor_scan_tick(frame);
     { extern void miniboss_tick(Cpu *, uint64_t); miniboss_tick(c, frame); }
-    {  // online play (off unless laonline.ini sets a mode): its UI state, the remote players' Links, Z-targeting,
-       // the team's pickups (runtime/hle/laonline*.c, ztarget.c)
+    if (laonline_configured()) {  // online play (laonline.ini / LAONLINE_MODE sets a mode): its UI state, the remote
+                                  // players' Links, Z-targeting, the team's pickups (runtime/hle/laonline*.c, ztarget.c)
         extern void laonline_ui_tick(uint64_t), laonline_tick(Cpu *, uint64_t), ztarget_tick(Cpu *, uint64_t),
             laonline_coop_tick(Cpu *, uint64_t);
         laonline_ui_tick(frame);
@@ -804,7 +806,10 @@ void give_item_tick(Cpu *c, uint64_t frame) {
     { extern void triforce_tick(void); triforce_tick(); }  // (Triforce hunt: the get message's flags, triforce.c)
     { extern void hookshot_tour_tick(uint64_t frame); hookshot_tour_tick(frame); }
     { extern void flags_ext_tick(void); flags_ext_tick(); }  // (game thread: flag gets / sets happen here too)
-    { extern void lao_dev_tick(uint64_t); lao_dev_tick(frame); }  // (online play's save-structure journal, after it)
+    if (laonline_configured()) {  // (online play's save-structure journal, after it)
+        extern void lao_dev_tick(uint64_t);
+        lao_dev_tick(frame);
+    }
     { extern void enemy_stairs_tick(void); enemy_stairs_tick(); }  // (after it: Armos stairs flags, enemy_random.c)
     { extern void rt_powder_flag_tick(void); rt_powder_flag_tick(); }  // (found powder: keysanity.c)
     { extern void silent_pickups_tick(uint64_t); silent_pickups_tick(frame); }  // (a silent Heart Container's refill)

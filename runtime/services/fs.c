@@ -778,7 +778,7 @@ static void commit(HostFs *fs) {
         const char *path = fs->pending[i];
         bool committed = !fs->failed[i] && commit_slot(path);
         int error = errno;  // (commit_slot's, before anything else can change it)
-        lao_dev_save(path, committed);
+        { extern bool laonline_configured(void); if (laonline_configured()) lao_dev_save(path, committed); }
         if (fs->failed[i]) {
             drop_slot(path);
             save_failed(fs, "dropped the failed save", path, 0);

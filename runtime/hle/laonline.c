@@ -1384,6 +1384,24 @@ static void launch_from_config(void) {
     laonline_launch_mode(rando_seed_dir() ? 2 : 1);
 }
 
+// Online play set up at all: laonline.ini or LAONLINE_MODE sets a mode (the config launch_from_config reads). The rest
+// of the game calls into online play only behind this (main.c, warp.c, input.c, bindings.c, souls.c, miniboss.c,
+// hooks.c, movie.c, fs.c), so without it the game runs as it does without online play: no journal file, no
+// Z-targeting, F6 to F8 free to bind (LAS Recomp's review, point 4: play with the feature off stays identical). Worked
+// out once, by main.c at boot before the other threads start (after rt_paths_init: the data root's laonline.ini).
+// g_laonline_on is the same, for the game code's patches (tools/patches.py: a load, not a call, on paths every actor
+// takes - each animation played).
+bool g_laonline_on;
+bool laonline_configured(void) {
+    static int known = -1;
+    if (known < 0) {
+        load_config();
+        known = g_cfg.mode != M_OFF;
+        g_laonline_on = known;
+    }
+    return known;
+}
+
 void laonline_tick(Cpu *c, uint64_t frame) {
     launch_from_config();
     if (!atomic_load(&g_launch_online)) return;
@@ -1398,7 +1416,11 @@ void laonline_tick(Cpu *c, uint64_t frame) {
             g_cfg.mode = M_OFF;
         }
         if (g_cfg.mode == M_OFF) return;
-        g_my_id = (uint32_t)rand() ^ (uint32_t)(uintptr_t)&init ^ (uint32_t)frame * 2654435761u;
+        // This PC's player id, from the OS's random source (runtime/platform/*_compat.h). It was rand() (never seeded:
+        // the same first value in every process) ^ this variable's address (one per boot on Windows) ^ the frame (1,
+        // the first one): two copies started alike - two on one PC, as tools/coop_tests/online_net.sh runs them -
+        // got the same id and each dropped the other's states as its own (accept_state).
+        do g_my_id = arc4random(); while (!g_my_id);
         if (g_cfg.mode == M_SERVER) {
             pthread_t t;
             if (pthread_create(&t, NULL, srv_thread, NULL) == 0) pthread_detach(t);

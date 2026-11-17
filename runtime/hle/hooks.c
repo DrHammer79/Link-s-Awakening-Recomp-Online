@@ -166,7 +166,8 @@ int rt_hook(Cpu *c, uint64_t site) {
         return rt_shadow_link_bgm();
     case H_LAONLINE_GAMEOVER_SITE: {  // LAONLINE_GAMEOVER_SITE - ldr x20, [sp, #0x18]: the Game Over event submitted
         extern void laonline_death_native(Cpu *c);  // (online play tells the others: laonline_death.c)
-        laonline_death_native(c);
+        extern bool laonline_configured(void);
+        if (laonline_configured()) laonline_death_native(c);
         return 0;
     }
     case H_BUFF_MUSIC_PICKUP_SITE:

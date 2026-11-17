@@ -21,3 +21,10 @@ tools/venv/
 venv/
 __pycache__/
 .DS_Store
+
+# online play (LA-Online) diagnostic journal and logs, written to the data root while it is set up (tests: the repo)
+/logs/
+/dev-events-log.txt
+/laonline-*.txt
+/laonline-*.jsonl
+/laonline-*.log

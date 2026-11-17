@@ -113,8 +113,11 @@ static const char *level_name(void) {
 uint64_t rt_actor_create_fn(uint64_t fn, uint32_t type, uint64_t info) {
     {   // online play: a boss's spawn logged, an actor made noted for PvP (read-only: runtime/hle/laonline*.c)
         extern void laonline_boss_spawn_diagnostic(uint32_t, uint64_t), laonline_v12_actor_created(uint32_t, uint64_t);
-        if (info) laonline_boss_spawn_diagnostic(type, LD64(info));
-        laonline_v12_actor_created(type, info);
+        extern bool laonline_configured(void);
+        if (laonline_configured()) {
+            if (info) laonline_boss_spawn_diagnostic(type, LD64(info));
+            laonline_v12_actor_created(type, info);
+        }
     }
     extern bool rt_digs_skip_plant(uint32_t type, uint64_t info);  // digsanity: no grass / bush on a dug tile
     if (rt_digs_skip_plant(type, info)) return 0;
