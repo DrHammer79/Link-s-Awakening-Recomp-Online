@@ -81,8 +81,7 @@ your own path 1.5 s late), `host` / `join` (two PCs, direct), `server` (his rela
   (`LARECOMP_GIVE_ITEM`) and comparing the save before and after. A grant made this way is a teammate's:
   `laonline_coop_remote_grant` keeps it from being reported back as this player's pickup. The rupee
   "undone a frame later" rewrite is gone: an `AddItem` of rupees from the same tick stayed (100 -> 156,
-  kept 5 s); a revert is logged ("shared rupees undone"), not written over. Still writing Link's hearts:
-  PvP damage (`pvp_set_hp`).
+  kept 5 s); a revert is logged ("shared rupees undone"), not written over.
 - `keysanity.c` `rt_add_item`: his observer (as V15.2 has it): the item a pickup adds, reported to the team
   (`laonline_coop_pickup`) and checked by the journal - missing from the first port, so this PC's
   pickups weren't shared. Behind `laonline_configured`.
@@ -91,14 +90,35 @@ your own path 1.5 s late), `host` / `join` (two PCs, direct), `server` (his rela
 - Players 2..8 of this PC (local co-op) on the relay as players of their own:
   `runtime/hle/laonline_local.c` (ours). His protocol has one player per relay connection, so each
   local player in the game gets a connection of his own (name "<Player 1's> P<n>", his colour, his
-  Link's position, facing, animation and hearts); nothing else goes out on it (progress, pickups,
-  deaths, chat, PvP stay Player 1's: one save per PC). No change to the protocol or the relay.
+  Link's position, facing, animation and hearts, and his PvP - below); nothing else goes out on it (progress,
+  pickups, deaths, chat stay Player 1's: one save per PC). No change to the protocol or the relay.
   In `laonline.c`: `laonline_relay_login` (the login the main connection uses), the main connection
   leaving these ids out (`laonline_local_peer_message` in `srv_handle`, `laonline_local_hide` after
   each message), the animation hook recording the other local Links' too, the map / room passed on.
   Each connection keeps the login it joined with: when Player 1's changes (online play stopped, another session picked
   on the Online page) it leaves at once and joins the new one.
   Relay mode only; direct host / join stays one player a side (its state packet has one).
+- PvP for each of this PC's players (`laonline_v12.c`): what V15.2 kept for Player 1 alone - his buttons
+  (`laonline_v12_input`), switch, attacks, cooldowns, hits taken, knockback, stagger - is a `PvpSelf` each, [0]
+  Player 1 and [1..7] players 2..8 (`laonline_v12_input_of` from `input.c` `coop_fill`, the stagger there too). Each
+  turns his own PvP on with his R3 (Player 1: F6 too); a player 2..8's switch, attack visuals and hits go out on his
+  own connection (`laonline_local_push`), so the relay names him the attacker; hits on him come in on it
+  (`laonline_local.c` -> `laonline_v12_hit_for`). His rules are unchanged (ranges, cones, delays, cooldowns, the spin,
+  bomb arrows, the dash, the stomp, knock-outs and the kill feed). The flash and the rumble stay Player 1's (his
+  screen, his pad).
+- PvP damage (`pvp_take`) is taken as the game takes its own hits, no longer written (LAS Recomp's review, point 2):
+  the difficulty setting (`rt_damage`: Hero Mode doubles it), local co-op's split (`rt_coop_damage_of`, as at the
+  game's damage sites: with own hearts a player 2..8's hit comes off his own and knocks him out at 0, for a revive),
+  then what is left off the game's hearts as its damage command takes it (main+0xd7c870: PlayerStatus+0x84). His two
+  writes (`pvp_set_hp`: PlayerStatus+0x84 and the save's 0x5544) were one value - PlayerStatus is in the live save at
+  0x54C0 (`docs/save-format.md`). The 6 s safety net after a knock-out still puts the hearts back if the game's own
+  death never starts.
+- Z-targeting (`ztarget.c`) for each of this PC's players: his own lock (his ZL; Player 1's L3 / F8 too), his Link
+  turned to it (`laonline_link_set_yaw`, his facing `laonline_link_yaw`), his stick circling it
+  (`ztarget_stick_of`), his PvP attacks aimed at it, his own reticle (players 2..8 in their co-op colour). What is
+  learned (the position in a transform, the yaw convention, the stick directions) is the same for every Link and the
+  one camera: still learned from Player 1. This PC's own Links are never targets - they move, so they were taken for
+  enemies.
 - `laonline_overlay.mm`: no update notice (his updater), no lobby seed keepalive (the lobby), the
   drawn circle for the death-notice portrait (his menu art).
 - Kept byte-identical for compatibility with his players: the seed-share strings
@@ -111,7 +131,7 @@ patches, `g_laonline_on`): without a mode or a relay in `laonline.ini` (or `LAON
 menu has no Online entry.
 
 `warp.c` (the per-frame ticks, `laonline_level_ready`), `input.c` (PvP / Z-targeting / stagger on
-this PC's Player 1, F6-F8, `input_hit_rumble`), `bindings.c` (F6-F8 reserved), `miniboss.c`
+each of this PC's players, F6-F8, `input_hit_rumble`), `bindings.c` (F6-F8 reserved), `miniboss.c`
 (puppets: no Appear event, no chamber music; Z-target actors), `souls.c` (`souls_flag_at`, actor
 notes), `movie.c` (the ending), `fs.c` / `main.c` / `dispatch.c` / `vulkan/device.c` (his
 diagnostic journal), `settings.c/.h` (`k_online`: the online settings, one table row each),
@@ -138,14 +158,14 @@ The rules the review set for this fork's co-op, checked for online play (2026-11
 - **General fixes as their own changes** (point 5): `imgui_glue.cpp` (UI images freed with their context,
   an image leaked when its view failed) is its own commit, for upstream on its own.
 - **Tests in the repository** (point 9): `tools/coop_tests/online.sh`, `online_net.sh`, `online_relay.sh`,
-  `online_lobby.sh`.
+  `online_lobby.sh`, `online_pvp.sh`.
 - **Mobile** (point 10): the menu / pause check above now runs off Windows too.
 - **Licence and credit**: MIT (c) ThyHeroOfTime, `LICENSE-LA-Online` (shipped beside `LICENSE`), the
   README's online paragraph, and the log's `[fork]` line names it.
 
 - **Save safety** (point 2): shared items, levels, rupees, ammo and recovery hearts through the game's
-  `AddItem` (above). Left: PvP damage writes Link's hearts (`pvp_set_hp`).
+  `AddItem` (above); PvP damage as the game's own hits (above).
 
 The save-safe grants, local players on the relay and the Online page above were tested against a stand-in relay
 (`tools/laonline_relay.py`, written from his client: `docs/laonline-protocol.md`), not his relay, which isn't public.
-PvP and Z-targeting still act for Player 1 alone.
+PvP and Z-targeting act for every player of a PC (`tools/coop_tests/online_pvp.sh`).

@@ -385,15 +385,23 @@ static uint64_t local_link_actor(void) {
     return link >= HEAP_BASE && link < HEAP_BASE + HEAP_MAX ? link : 0;
 }
 uint64_t laonline_local_link(void) { return local_link_actor(); }
-int laonline_local_yaw(float *yaw) {  /* Link's facing, as the puppets send it */
-    uint64_t link = local_link_actor(), tr = link ? LD64(link + 0x80) : 0;
+int laonline_link_yaw(uint64_t link, float *yaw);
+int laonline_local_yaw(float *yaw) { return laonline_link_yaw(local_link_actor(), yaw); }
+/* a Link's facing, as the puppets send it - Player 1's, or (LAS Recomp Co-Op's port) another local co-op player's
+ * (ztarget.c: each player's own Z-target) */
+int laonline_link_yaw(uint64_t link, float *yaw) {
+    uint64_t tr = link ? LD64(link + 0x80) : 0;
     if (!(tr >= HEAP_BASE && tr < HEAP_BASE + HEAP_MAX)) return 0;
     *yaw = lao_quaternion_yaw((const float *)(uintptr_t)(tr + 0x90));
     return isfinite(*yaw);
 }
-int laonline_local_set_yaw(Cpu *c, float yaw) {  /* turn Link (the puppets' rotation setter) */
+int laonline_link_set_yaw(Cpu *c, uint64_t link, float yaw);
+int laonline_local_set_yaw(Cpu *c, float yaw) { return laonline_link_set_yaw(c, local_link_actor(), yaw); }
+/* turn a Link (the puppets' rotation setter) - Player 1's, or (LAS Recomp Co-Op's port) another local co-op player's
+ * hit in PvP (laonline_v12.c) */
+int laonline_link_set_yaw(Cpu *c, uint64_t link, float yaw) {
     if (!c || !isfinite(yaw) || !native_adapter_ready()) return 0;
-    uint64_t link = local_link_actor(), tr = link ? LD64(link + 0x80) : 0;
+    uint64_t tr = link ? LD64(link + 0x80) : 0;
     if (!(tr >= HEAP_BASE && tr < HEAP_BASE + HEAP_MAX)) return 0;
     if (!g_transform_args) g_transform_args = (uint64_t)(uintptr_t)hle_alloc(0x40);
     float *q = (float *)(uintptr_t)(g_transform_args + 16);

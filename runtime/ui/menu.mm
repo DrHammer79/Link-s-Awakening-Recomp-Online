@@ -246,6 +246,7 @@ bool laonline_overlay_wanted(void);  // (runtime/ui/laonline_overlay.mm: the oth
 void laonline_overlay_draw(ImVec2 display, ImFont *font, float scale);
 void ztarget_overlay_draw(ImVec2 display, float scale);  // (the Z-target reticle, in play online or not)
 int ztarget_get(float pos[3], int *player);              // (runtime/hle/ztarget.c: a target locked, and where)
+int ztarget_any(void);  // (any of this PC's players locked: each one's own Z-target, runtime/hle/ztarget.c)
 }
 static std::atomic<bool> g_chat_open(false), g_chat_focus_reset(false);
 static std::atomic<uint64_t> g_chat_generation(0);
@@ -2202,7 +2203,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool coop = !open && coop_hud_wanted();       // (local co-op: the other players' hearts)
     bool lao = laonline_overlay_wanted();  // (online play: the others' names and hearts, chat, the feed, the minimap)
     float zt_at[3];
-    bool zt = !open && game_in_play() && ztarget_get(zt_at, NULL);  // (a Z-target locked: its reticle)
+    bool zt = !open && game_in_play() && ztarget_any();  // (a Z-target locked: its reticle)
 #ifdef __APPLE__
     plastic_perf_note(cb, open);  // (LARECOMP_UI_PERF test only)
 #else

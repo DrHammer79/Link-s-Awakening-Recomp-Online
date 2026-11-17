@@ -184,7 +184,25 @@ static int send_frame(sock_t s, const uint8_t *body, int n) {
     return 1;
 }
 
+// PvP (laonline_v12.c, each local player's own attacks and his PvP switch): frames to go out on his connection, in
+// order, after his STATE. Game thread pushes, the network thread sends; dropped with the connection.
+typedef struct { uint8_t b[32]; int n; } OutFrame;
+static OutFrame g_out[LOCAL_MAX][16];
+static int g_out_n[LOCAL_MAX];
+int laonline_local_push(int i, const uint8_t *frame, int n) {  // frame: u16 length + body, as push_frame's
+    if (i < 1 || i >= LOCAL_MAX || n < 3 || n - 2 > (int)sizeof g_out[0][0].b || atomic_load(&g_id[i]) <= 0) return 0;
+    pthread_mutex_lock(&g_lock);
+    int ok = g_out_n[i] < 16;
+    if (ok) g_out[i][g_out_n[i]].n = n - 2, memcpy(g_out[i][g_out_n[i]].b, frame + 2, (size_t)(n - 2)), g_out_n[i]++;
+    pthread_mutex_unlock(&g_lock);
+    return ok;
+}
+int laonline_local_relay_id(int i) { return i >= 1 && i < LOCAL_MAX ? atomic_load(&g_id[i]) - 1 : -1; }
+
 static void conn_close(Conn *k, int i) {
+    pthread_mutex_lock(&g_lock);
+    g_out_n[i] = 0;
+    pthread_mutex_unlock(&g_lock);
     if (k->s != BAD_SOCK) sock_close(k->s);
     memset(k, 0, sizeof *k);
     k->s = BAD_SOCK;
@@ -259,6 +277,9 @@ static int conn_read(Conn *k, int i) {
             } else if (f[0] == 0x8F) {
                 LOG("[laonline] local player %d: refused by the relay\n", i + 1);
                 return 0;
+            } else if (f[0] == 0xA2 && fl == 4 && f[1] == 1) {  // (a PvP hit on him: S_PVP kind 1, attacker, quarters)
+                extern void laonline_v12_hit_for(int self, int from, int quarters);
+                laonline_v12_hit_for(i, f[2], f[3]);
             }
             o += 2 + fl;
         }
@@ -316,6 +337,18 @@ static void *net_thread(void *arg) {
                     uint8_t pr[4] = {0x08, (uint8_t)(s.rgb >> 16), (uint8_t)(s.rgb >> 8), (uint8_t)s.rgb};
                     ok = send_frame(k->s, pr, 4), k->sent_rgb = s.rgb;
                 }
+            }
+            while (ok) {  // (his PvP's frames: laonline_local_push)
+                uint8_t body[32];
+                int n = 0;
+                pthread_mutex_lock(&g_lock);
+                if (g_out_n[i]) {
+                    n = g_out[i][0].n, memcpy(body, g_out[i][0].b, (size_t)n);
+                    memmove(&g_out[i][0], &g_out[i][1], sizeof g_out[i][0] * (size_t)--g_out_n[i]);
+                }
+                pthread_mutex_unlock(&g_lock);
+                if (!n) break;
+                ok = send_frame(k->s, body, n);
             }
             if (ok && now - k->ping_at >= 15000) {  // (keepalive, as Player 1's)
                 uint32_t t = (uint32_t)now;

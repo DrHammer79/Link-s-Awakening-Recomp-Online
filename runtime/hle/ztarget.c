@@ -15,6 +15,12 @@
 //
 // Damage animation (PvP hit reaction): when an ENEMY hurts Link, the animation he plays within 0.3 s is noted; the id
 // seen in two separate hits is kept in laonline-damage-anim.txt and played on Link when a player hits him in PvP.
+//
+// (LAS Recomp Co-Op's port) Each of this PC's players has his own Z-target: Player 1 (ZL, L3, F8) and local co-op
+// players 2..8 (their own ZL: ztarget_input_of) - his own lock, his Link turned to it, his stick circling it, his PvP
+// attacks aimed at it, his own reticle. What is learned (the position in a transform, the yaw convention, the stick
+// directions) is the same for every Link and the one camera: learned from Player 1 as before. This PC's own Links are
+// never targets (they move, so they were taken for enemies).
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -32,11 +38,16 @@ extern int laonline_v12_pvp_local(void);
 extern int laonline_v12_pvp_peer(int id);
 extern uint64_t laonline_local_link(void);
 extern int laonline_local_yaw(float *yaw);
-extern int laonline_local_set_yaw(Cpu *c, float yaw);
+extern int laonline_link_yaw(uint64_t link, float *yaw);
+extern int laonline_link_set_yaw(Cpu *c, uint64_t link, float yaw);
+extern int laonline_v12_pvp_on(int self);
+extern uint64_t coop_player(int i);
+extern uint32_t coop_joined(void);
 extern uint16_t laonline_local_anim(uint64_t *at_ms);
 extern bool menu_input_captured(void);
 
 #define NPLAYERS 8
+#define NSELF 8  /* this PC's players: 0 Player 1, 1..7 local co-op players 2..8 */
 static uint64_t now_ms(void) { return plat_now_ns() / 1000000ull; }
 static int heap_ptr(uint64_t p) { return p >= HEAP_BASE && p < HEAP_BASE + 0x200000000ull; }
 
@@ -58,6 +69,7 @@ void ztarget_actor_seen(uint64_t o) {
     if (!g_ga || !heap_ptr(o) || g_pos_off < 0) return;
     uint64_t vt = LD64(o);
     if (vt == GA(SHADOW_LINK_VTABLE) || o == laonline_local_link()) return;  /* (players: by their own positions) */
+    for (int i = 1; i < NSELF; i++) if ((coop_joined() >> i & 1) && o == coop_player(i)) return;  /* (this PC's other Links) */
     float p[3];
     if (!read_pos(o, p)) return;
     uint64_t t = now_ms();
@@ -80,24 +92,32 @@ void ztarget_actor_seen(uint64_t o) {
 
 /* ---------------------------------------------------------------- shared state (game / input / UI threads) */
 static pthread_mutex_t mx = PTHREAD_MUTEX_INITIALIZER;
-static atomic_int g_toggle;
-static int g_locked;            /* 0 none, 1 player, 2 actor */
-static int g_lock_player = -1;
-static uint64_t g_lock_obj;
-static float g_lock_pos[3], g_me[3], g_keep_r;
-static int g_have_me;
+typedef struct {                /* one of this PC's players' Z-target (the lock: mx) */
+    atomic_int toggle;
+    int locked;                 /* 0 none, 1 player, 2 actor */
+    int lock_player;
+    uint64_t lock_obj;
+    float lock_pos[3], me[3], keep_r;
+    int have_me;
+    float stick[2];             /* last stick sent to the game (-1..1) */
+    uint64_t prev;              /* (his ZL) */
+    float facing_x, facing_z, last_x, last_z;
+} ZSelf;
+static ZSelf g_z[NSELF];
 static int g_yaw_conv = -1;     /* 0..3: yaw = atan2(sx*dx, sz*dz) family, learned */
 static float g_conv_err[4]; static int g_conv_n;
 static float g_ax = 1, g_az = -1; static int g_axes_known; static float g_sum_x, g_sum_z; static int g_axes_n;
-static float g_stick[2];        /* last stick sent to the game (-1..1) */
 
-void ztarget_toggle(void) { atomic_store(&g_toggle, 1); }
-uint64_t ztarget_input(uint64_t buttons, int menu) {  /* input.c: ZL press toggles (the game has nothing on ZL) */
-    static uint64_t prev;
-    uint64_t pressed = buttons & ~prev;
-    prev = buttons;
-    if (!menu && (pressed & (1ull << 8))) atomic_store(&g_toggle, 1);
+void ztarget_toggle(void) { atomic_store(&g_z[0].toggle, 1); }
+static uint64_t z_input(int s, uint64_t buttons, int menu) {  /* ZL press toggles (the game has nothing on ZL) */
+    uint64_t pressed = buttons & ~g_z[s].prev;
+    g_z[s].prev = buttons;
+    if (!menu && (pressed & (1ull << 8))) atomic_store(&g_z[s].toggle, 1);
     return buttons;
+}
+uint64_t ztarget_input(uint64_t buttons, int menu) { return z_input(0, buttons, menu); }  /* input.c: Player 1 */
+uint64_t ztarget_input_of(int s, uint64_t buttons, int menu) {  /* input.c coop_fill: players 2..8 (s = 1..7) */
+    return s >= 1 && s < NSELF ? z_input(s, buttons, menu) : buttons;
 }
 
 static float yaw_for(int conv, float dx, float dz) {
@@ -115,28 +135,32 @@ int ztarget_yaw_toward(float dx, float dz, float *yaw) {  /* for the PvP hit rea
     *yaw = yaw_for(conv, dx, dz);
     return 1;
 }
-int ztarget_get(float pos[3], int *player) {  /* PvP aim + overlay reticle */
+int ztarget_get_of(int s, float pos[3], int *player) {  /* PvP aim + overlay reticle: player s's lock */
+    if (s < 0 || s >= NSELF) return 0;
     pthread_mutex_lock(&mx);
-    int on = g_locked;
-    if (on) { memcpy(pos, g_lock_pos, 12); if (player) *player = g_locked == 1 ? g_lock_player : -1; }
+    ZSelf *z = &g_z[s];
+    int on = z->locked;
+    if (on) { memcpy(pos, z->lock_pos, 12); if (player) *player = z->locked == 1 ? z->lock_player : -1; }
     pthread_mutex_unlock(&mx);
     return on;
 }
+int ztarget_get(float pos[3], int *player) { return ztarget_get_of(0, pos, player); }  /* (Player 1's) */
 
 /* stick (input thread): while locked, sideways goes AROUND the target at the same distance */
-void ztarget_stick(int32_t *lx, int32_t *ly) {
+static void z_stick(int s, int32_t *lx, int32_t *ly) {
     float sx = *lx / 32767.f, sy = *ly / 32767.f;
     pthread_mutex_lock(&mx);
-    g_stick[0] = sx, g_stick[1] = sy;
-    int on = g_locked && g_have_me && g_axes_known;
-    float tx = g_lock_pos[0] - g_me[0], tz = g_lock_pos[2] - g_me[2], keep = g_keep_r, ax = g_ax, az = g_az;
+    ZSelf *z = &g_z[s];
+    z->stick[0] = sx, z->stick[1] = sy;
+    int on = z->locked && z->have_me && g_axes_known;
+    float tx = z->lock_pos[0] - z->me[0], tz = z->lock_pos[2] - z->me[2], keep = z->keep_r, ax = g_ax, az = g_az;
     pthread_mutex_unlock(&mx);
     float mag = sqrtf(sx * sx + sy * sy), r = sqrtf(tx * tx + tz * tz);
     if (!on || mag < .2f || r < .3f) return;
     float wx = sx * ax, wz = sy * az;               /* stick -> world direction */
     float Rx = tx / r, Rz = tz / r, Tx = -Rz, Tz = Rx;  /* to the target, around it */
     float rad = wx * Rx + wz * Rz, tan_ = wx * Tx + wz * Tz;
-    if (fabsf(tan_) <= fabsf(rad)) { pthread_mutex_lock(&mx); g_keep_r = r; pthread_mutex_unlock(&mx); return; }
+    if (fabsf(tan_) <= fabsf(rad)) { pthread_mutex_lock(&mx); z->keep_r = r; pthread_mutex_unlock(&mx); return; }
     float pull = (r - keep) * .8f; if (pull > .5f) pull = .5f; if (pull < -.5f) pull = -.5f;
     float ox = (tan_ > 0 ? 1.f : -1.f) * Tx + pull * Rx, oz = (tan_ > 0 ? 1.f : -1.f) * Tz + pull * Rz;
     float on_ = sqrtf(ox * ox + oz * oz); if (on_ < 1e-4f) return;
@@ -145,6 +169,8 @@ void ztarget_stick(int32_t *lx, int32_t *ly) {
     if (nx > 1) nx = 1; if (nx < -1) nx = -1; if (ny > 1) ny = 1; if (ny < -1) ny = -1;
     *lx = (int32_t)lrintf(nx * 32767.f), *ly = (int32_t)lrintf(ny * 32767.f);
 }
+void ztarget_stick(int32_t *lx, int32_t *ly) { z_stick(0, lx, ly); }  /* input.c: Player 1 */
+void ztarget_stick_of(int s, int32_t *lx, int32_t *ly) { if (s >= 1 && s < NSELF) z_stick(s, lx, ly); }  /* players 2..8 */
 
 /* ---------------------------------------------------------------- learned damage animation */
 static uint16_t g_dmg_ids[8]; static int g_dmg_cnt[8], g_dmg_n; static uint16_t g_dmg_anim; static int g_dmg_loaded;
@@ -216,7 +242,7 @@ static void learn(const float me[3], uint64_t t) {
     memcpy(last, me, 12); last_t = t;
     if (d / dt < 1.5f || d > 3.f) return;  /* walking or running, not a warp */
     pthread_mutex_lock(&mx);
-    int locked = g_locked; float sx = g_stick[0], sy = g_stick[1];
+    int locked = g_z[0].locked; float sx = g_z[0].stick[0], sy = g_z[0].stick[1];  /* (learned from Player 1) */
     pthread_mutex_unlock(&mx);
     if (locked) return;  /* (we turn him then) */
     float yaw;
@@ -240,27 +266,40 @@ static void learn(const float me[3], uint64_t t) {
         }
     }
 }
-static float facing_x = 0, facing_z = 1;
-void ztarget_tick(Cpu *c, uint64_t frame) {
-    if (!g_ga || !game_in_play()) { pthread_mutex_lock(&mx); g_locked = 0; g_have_me = 0; pthread_mutex_unlock(&mx); atomic_store(&g_toggle, 0); return; }
-    dmg_tick();
-    uint64_t pc = doorjump_player(frame);
-    if (!pc) { pthread_mutex_lock(&mx); g_have_me = 0; pthread_mutex_unlock(&mx); return; }
+/* this PC's player s: his Link and where he is (Player 1: as V15 found him; the others: their Link's collision) */
+static int self_pos(int s, uint64_t frame, uint64_t *link, float me[3]) {
+    uint64_t pc;
+    if (!s) pc = doorjump_player(frame), *link = laonline_local_link();
+    else {
+        if (!(coop_joined() >> s & 1)) return 0;
+        *link = coop_player(s);
+        pc = *link ? LD64(*link + 0x80) : 0;
+        if (!heap_ptr(pc) || LD64(pc) != GA(PLAYER_COLLISION_VT)) return 0;
+    }
+    if (!pc) return 0;
     const float *mp = (const float *)(uintptr_t)(pc + 0x80);
-    float me[3] = {mp[0], mp[1], mp[2]};
-    uint64_t t = now_ms();
-    calibrate_pos(me);
-    { static float lx, lz; float dx = me[0] - lx, dz = me[2] - lz, d = sqrtf(dx * dx + dz * dz);
-      if (d > .03f && d < 3.f) facing_x = dx / d, facing_z = dz / d; lx = me[0], lz = me[2]; }
-    learn(me, t);
-    int want = atomic_exchange(&g_toggle, 0);
+    me[0] = mp[0], me[1] = mp[1], me[2] = mp[2];
+    return 1;
+}
+static void z_tick(Cpu *c, int s, uint64_t frame, uint64_t t) {
+    ZSelf *z = &g_z[s];
+    uint64_t link = 0; float me[3];
+    if (!self_pos(s, frame, &link, me)) {
+        pthread_mutex_lock(&mx); z->have_me = 0; if (s) z->locked = 0; pthread_mutex_unlock(&mx);
+        if (s) atomic_store(&z->toggle, 0);
+        return;
+    }
+    if (!s) { calibrate_pos(me); learn(me, t); }
+    { float dx = me[0] - z->last_x, dz = me[2] - z->last_z, d = sqrtf(dx * dx + dz * dz);
+      if (d > .03f && d < 3.f) z->facing_x = dx / d, z->facing_z = dz / d; z->last_x = me[0], z->last_z = me[2]; }
+    int want = atomic_exchange(&z->toggle, 0);
     pthread_mutex_lock(&mx);
-    int locked = g_locked, pl = g_lock_player; uint64_t obj = g_lock_obj; float tp[3]; memcpy(tp, g_lock_pos, 12);
+    int locked = z->locked, was = z->locked, pl = z->lock_player; uint64_t obj = z->lock_obj; float tp[3]; memcpy(tp, z->lock_pos, 12);
     pthread_mutex_unlock(&mx);
     /* keep the current target, or let go */
     if (locked == 1) {
         float p[3]; uint16_t map; int local;
-        if (!laonline_v12_pvp_local() || !laonline_v12_pvp_peer(pl) || !laonline_v12_peer(pl, p, &map, &local)) locked = 0;
+        if (!laonline_v12_pvp_on(s) || !laonline_v12_pvp_peer(pl) || !laonline_v12_peer(pl, p, &map, &local)) locked = 0;
         else memcpy(tp, p, 12);
     } else if (locked == 2) {
         int found = 0;
@@ -268,47 +307,62 @@ void ztarget_tick(Cpu *c, uint64_t frame) {
         if (!found) locked = 0;
     }
     if (locked) { float dx = tp[0] - me[0], dz = tp[2] - me[2]; if (dx * dx + dz * dz > 16.f * 16.f || fabsf(tp[1] - me[1]) > 6.f) locked = 0; }
-    if (want && g_locked) { locked = 0; LOG("[ztarget] off\n"); }
+    if (want && was) { locked = 0; LOG("[ztarget] off (player %d)\n", s + 1); }
     else if (want) {  /* pick: the nearest in reach, in front of Link counts double */
         float best = 1e9f; int bpl = -1; uint64_t bobj = 0; float bp[3] = {0};
-        float fx = facing_x, fz = facing_z, yaw;
-        if (g_yaw_conv >= 0 && laonline_local_yaw(&yaw)) {  /* his real facing: the inverse of the learned convention */
-            for (int k = 0; k < 64; k++) { float a = k * 0.0981748f, x = sinf(a), z = cosf(a); if (ang_diff(yaw_for(g_yaw_conv, x, z), yaw) < .06f) { fx = x, fz = z; break; } }
+        float fx = z->facing_x, fz = z->facing_z, yaw;
+        if (g_yaw_conv >= 0 && laonline_link_yaw(link, &yaw)) {  /* his real facing: the inverse of the learned convention */
+            for (int k = 0; k < 64; k++) { float a = k * 0.0981748f, x = sinf(a), zz = cosf(a); if (ang_diff(yaw_for(g_yaw_conv, x, zz), yaw) < .06f) { fx = x, fz = zz; break; } }
         }
-        if (laonline_v12_pvp_local())
+        if (laonline_v12_pvp_on(s))
             for (int id = 0; id < NPLAYERS; id++) {
                 float p[3]; uint16_t map; int local;
                 if (!laonline_v12_pvp_peer(id) || !laonline_v12_peer(id, p, &map, &local) || id == local) continue;
                 float dx = p[0] - me[0], dz = p[2] - me[2], d = sqrtf(dx * dx + dz * dz);
                 if (d > 12.f || fabsf(p[1] - me[1]) > 3.f) continue;
-                float s = d * ((d > .1f && (dx * fx + dz * fz) / d > .3f) ? 1.f : 2.f) * .8f;  /* (players first) */
-                if (s < best) best = s, bpl = id, bobj = 0, memcpy(bp, p, 12);
+                float sc = d * ((d > .1f && (dx * fx + dz * fz) / d > .3f) ? 1.f : 2.f) * .8f;  /* (players first) */
+                if (sc < best) best = sc, bpl = id, bobj = 0, memcpy(bp, p, 12);
             }
         for (int i = 0; i < NACT; i++) {
             Act *a = &g_act[i];
             if (!a->o || t - a->seen > 300 || a->moved < .4f) continue;
             float dx = a->p[0] - me[0], dz = a->p[2] - me[2], d = sqrtf(dx * dx + dz * dz);
             if (d > 10.f || d < .2f || fabsf(a->p[1] - me[1]) > 3.f) continue;
-            float s = d * ((dx * fx + dz * fz) / d > .3f ? 1.f : 2.f);
-            if (s < best) best = s, bpl = -1, bobj = a->o, memcpy(bp, a->p, 12);
+            float sc = d * ((dx * fx + dz * fz) / d > .3f ? 1.f : 2.f);
+            if (sc < best) best = sc, bpl = -1, bobj = a->o, memcpy(bp, a->p, 12);
         }
         if (best < 1e8f) {
             locked = bpl >= 0 ? 1 : 2; pl = bpl; obj = bobj; memcpy(tp, bp, 12);
-            LOG("[ztarget] locked on %s (%.1f away)\n", bpl >= 0 ? "a player" : "an actor", best);
-        } else LOG("[ztarget] nothing to lock on to nearby\n");
+            LOG("[ztarget] player %d locked on %s (%.1f away)\n", s + 1, bpl >= 0 ? "a player" : "an actor", best);
+        } else LOG("[ztarget] player %d: nothing to lock on to nearby\n", s + 1);
     }
     pthread_mutex_lock(&mx);
-    if (locked && !g_locked) { float dx = tp[0] - me[0], dz = tp[2] - me[2]; g_keep_r = sqrtf(dx * dx + dz * dz); }
-    g_locked = locked; g_lock_player = pl; g_lock_obj = obj; memcpy(g_lock_pos, tp, 12); memcpy(g_me, me, 12); g_have_me = 1;
+    if (locked && !was) { float dx = tp[0] - me[0], dz = tp[2] - me[2]; z->keep_r = sqrtf(dx * dx + dz * dz); }
+    z->locked = locked; z->lock_player = pl; z->lock_obj = obj; memcpy(z->lock_pos, tp, 12); memcpy(z->me, me, 12); z->have_me = 1;
     int conv = g_yaw_conv;
     pthread_mutex_unlock(&mx);
     /* face the target */
     if (locked && conv >= 0 && !menu_input_captured()) {
         float dx = tp[0] - me[0], dz = tp[2] - me[2];
-        if (dx * dx + dz * dz > .04f) laonline_local_set_yaw(c, yaw_for(conv, dx, dz));
+        if (dx * dx + dz * dz > .04f) laonline_link_set_yaw(c, link, yaw_for(conv, dx, dz));
     }
+}
+void ztarget_tick(Cpu *c, uint64_t frame) {
+    if (!g_ga || !game_in_play()) {
+        pthread_mutex_lock(&mx); for (int s = 0; s < NSELF; s++) g_z[s].locked = 0, g_z[s].have_me = 0; pthread_mutex_unlock(&mx);
+        for (int s = 0; s < NSELF; s++) atomic_store(&g_z[s].toggle, 0);
+        return;
+    }
+    dmg_tick();
+    uint64_t t = now_ms();
+    for (int s = 0; s < NSELF; s++) z_tick(c, s, frame, t);
 }
 RT_ON_RESET(ztarget_reset) {
     memset(g_act, 0, sizeof g_act);
-    pthread_mutex_lock(&mx); g_locked = 0; g_have_me = 0; pthread_mutex_unlock(&mx);
+    pthread_mutex_lock(&mx); for (int s = 0; s < NSELF; s++) g_z[s].locked = 0, g_z[s].have_me = 0; pthread_mutex_unlock(&mx);
+}
+int ztarget_any(void) {  /* (menu.mm: a reticle to draw - any of this PC's players locked) */
+    int on = 0;
+    pthread_mutex_lock(&mx); for (int s = 0; s < NSELF; s++) on |= g_z[s].locked != 0; pthread_mutex_unlock(&mx);
+    return on;
 }

@@ -163,10 +163,14 @@ static int16_t item_in[K_END - K_ITEMS], item_sent[K_END - K_ITEMS];
 static int relay_v12, relay_pvp135, relay_pvpko, relay_ending, relay_pvpcoop, welcome_seen;
 static int tot_kills, tot_losses, tot_known;  /* V15: the server's totals for your name (Global) */
 static atomic_int global_rando;
-static atomic_int pvp_local, pvp_sent_state = -1;
+/* (LAS Recomp Co-Op's port) PvP for each of this PC's players: [0] Player 1 - the main connection, as V15.2's one
+ * player - and [1..7] local co-op players 2..8, each on his own relay connection (laonline_local.c). Each has his own
+ * switch (his R3; F6 is Player 1's), his own attacks, and takes his own hits (below: PvpSelf, pvp_tick). */
+#define PVP_SELVES 8
+static atomic_int pvp_on_of[PVP_SELVES], pvp_sent_state = -1;
 static _Atomic unsigned char pvp_peer[LAO_PLAYERS];
-static int hit_from[16], hit_n;
-static uint8_t hit_amount[16];
+static int hit_from[PVP_SELVES][16], hit_n[PVP_SELVES];  /* (mx) hits taken, from the relay: who, how much */
+static uint8_t hit_amount[PVP_SELVES][16];
 
 static int push_frame(const uint8_t *b, int n) {  /* caller holds mx; 0 = queue full (retried next scan) */
     if (n > (int)sizeof outq[0].b || out_count >= sizeof outq / sizeof outq[0]) return 0;
@@ -191,7 +195,7 @@ int laonline_v12_packet(uint8_t *out, int capacity, int launch_mode) {
     cfg_load();
     int n = 0;
     pthread_mutex_lock(&mx);
-    int want = atomic_load(&pvp_local);
+    int want = atomic_load(&pvp_on_of[0]);
     int pvp_ok = launch_mode == 3 || ((launch_mode == 1 || launch_mode == 2) && relay_pvpcoop);  /* V15: co-op too */
     if (pvp_ok && relay_v12 && want != atomic_load(&pvp_sent_state) && capacity >= 5) {
         out[0] = 3; out[1] = 0; out[2] = LAO_C_PVP; out[3] = 0; out[4] = (uint8_t)want; n = 5;
@@ -213,7 +217,7 @@ static void reset_connection_state(void) {  /* caller holds mx */
     memset(item_in, 0, sizeof item_in); memset(item_sent, 0, sizeof item_sent);
     ext_n = 0; memset(soul_sent, 0, sizeof soul_sent);
     world_n = 0; memset(world_sent, 0, sizeof world_sent);
-    out_head = out_count = 0; hit_n = 0; welcome_seen = 1; relay_v12 = 0; relay_pvp135 = 0; relay_pvpko = 0; relay_ending = 0; relay_pvpcoop = 0; tot_known = 0;
+    out_head = out_count = 0; memset(hit_n, 0, sizeof hit_n); welcome_seen = 1; relay_v12 = 0; relay_pvp135 = 0; relay_pvpko = 0; relay_ending = 0; relay_pvpcoop = 0; tot_known = 0;
     atomic_store(&pvp_sent_state, -1);
     for (int i = 0; i < LAO_PLAYERS; i++) atomic_store(&pvp_peer[i], 0);
 }
@@ -454,7 +458,7 @@ float laonline_v12_killfeed(int i, char *line1, int cap1, char *line2, int cap2)
 }
 int laonline_v12_totals(int *kills, int *losses) {
     pthread_mutex_lock(&mx);
-    int on = tot_known && global_mode() && atomic_load(&pvp_local);
+    int on = tot_known && global_mode() && atomic_load(&pvp_on_of[0]);
     *kills = tot_kills, *losses = tot_losses;
     pthread_mutex_unlock(&mx);
     return on;
@@ -464,7 +468,7 @@ int laonline_v12_my_kos(int *kills, int *falls) {
     *kills = ko_kills, *falls = ko_falls;
     int on = relay_pvpko;
     pthread_mutex_unlock(&mx);
-    return on && global_mode() && atomic_load(&pvp_local);
+    return on && global_mode() && atomic_load(&pvp_on_of[0]);
 }
 
 /* ------------------------------------------------------------------ V14 PvP hit markers + lock-on */
@@ -568,7 +572,7 @@ void laonline_v12_message(const uint8_t *b, size_t n) {
         hitmark_add(b[2], b[3], b[4]);  /* V14: the server confirmed a PvP hit (attacker, victim, quarter hearts) */
     } else if (b[0] == LAO_S_PVP && n == 4 && b[2] < LAO_PLAYERS) {
         if (b[1] == 0) atomic_store(&pvp_peer[b[2]], b[3] ? 1 : 0);
-        else if (b[1] == 1 && hit_n < 16) { hit_from[hit_n] = b[2]; hit_amount[hit_n++] = b[3]; }
+        else if (b[1] == 1 && hit_n[0] < 16) { hit_from[0][hit_n[0]] = b[2]; hit_amount[0][hit_n[0]++] = b[3]; }  /* (Player 1: the main connection) */
     } else if (b[0] == 0x83 && n == 2 && b[1] < LAO_PLAYERS) {
         atomic_store(&pvp_peer[b[1]], 0);
     }
@@ -867,7 +871,7 @@ int laonline_v12_hide_puppet(const char *level) {
 
 /* ------------------------------------------------------------------ input (game thread) / keys (UI thread) */
 static atomic_int key_f6, key_f7_down, key_lock;
-static uint64_t prev_buttons, r3_since, assist_since, swing_until;
+static uint64_t assist_since;
 static _Atomic uint64_t research_press_ms;
 /* V13.5 research for the next PvP step (real bombs / arrows / knockback on the other screen): while PvP is on, every
  * native actor the game creates within 0.4 s of your B / X / Y press is written to laonline-pvp-research.log (actor
@@ -875,7 +879,7 @@ static _Atomic uint64_t research_press_ms;
  * and spawn data of Bomb / Arrow / Boomerang / Hookshot / Magic Rod / Powder can be used to spawn them for others. */
 void laonline_v12_actor_created(uint32_t type, uint64_t info) {
     static int lines;
-    if (!atomic_load(&pvp_local) || !info || lines >= 300) return;
+    if (!atomic_load(&pvp_on_of[0]) || !info || lines >= 300) return;
     uint64_t t = atomic_load(&research_press_ms), now = ms_now();
     if (!t || now - t > 400) return;
     FILE *f = fopen("laonline-pvp-research.log", "a"); if (!f) return;
@@ -887,7 +891,6 @@ void laonline_v12_actor_created(uint32_t type, uint64_t info) {
     fputc('\n', f); fclose(f); lines++;
 }
 /* V13.5 PvP item attacks: X / Y presses, resolved in pvp_tick with Link's position and facing */
-static int item_press_slot[4], item_press_n; static uint64_t item_press_at[4];
 typedef struct { int item; float range, cone; int delay_ms, quarters; const char *name; float ahead; } PvpAttack;
 /* item ids = the equip byte values (dpad_shortcuts.c predicates); 100+ = moves that are not one item press (V14) */
 enum { PVP_SWORD = 100, PVP_SPIN = 101, PVP_BOMB_ARROW = 102, PVP_DASH = 103, PVP_STOMP = 104 };
@@ -912,20 +915,38 @@ static int pvp_cooldown_ms(int item) {
     switch (item) { case 2: return 900; case 3: return 350; case 4: return 900; case 5: return 1200; case 6: return 500; case 8: return 500;
                     case PVP_BOMB_ARROW: return 900; case PVP_STOMP: return 700; default: return 0; }
 }
-static uint64_t pvp_ready_at[128];
-static int pvp_cooldown_ok(int item, uint64_t now) {
-    int ms = pvp_cooldown_ms(item); if (item < 0 || item >= 128) return 1;
-    if (now < pvp_ready_at[item]) return 0;
-    pvp_ready_at[item] = now + (uint64_t)ms; return 1;
-}
 static const PvpAttack *pvp_move(int id) {
     for (unsigned k = 0; k < sizeof k_pvp_moves / sizeof *k_pvp_moves; k++) if (k_pvp_moves[k].item == id) return &k_pvp_moves[k];
     return NULL;
 }
-static uint64_t b_down_at, x_down_at, y_down_at;  /* V14: held buttons (spin attack charge, boots dash) */
-static int spin_req;
 typedef struct { const PvpAttack *a; uint64_t at, made; float x, y, z, fx, fz; unsigned id; int quarters; } PvpShot;
-static PvpShot shots[8]; static int shot_n; static unsigned shot_seq;
+/* (LAS Recomp Co-Op's port) One of this PC's players in PvP - what V15.2 kept for Player 1 alone, now for each:
+ * [0] Player 1, [1..7] local co-op players 2..8 (each on his own relay connection, laonline_local.c). */
+typedef struct {
+    uint64_t prev_buttons, r3_since, swing_until, b_down_at, x_down_at, y_down_at;  /* his buttons (the held: mx) */
+    unsigned swing_id, shown_swing, hit_swing[LAO_PLAYERS];
+    int spin_req, item_press_slot[4], item_press_n;  /* (mx) */
+    float face_x, face_z, last_me[3]; int have_last;  /* facing = the way he last moved (or his Z-target) */
+    PvpShot shots[8]; int shot_n;
+    uint64_t ready_at[128];  /* V15.1 cooldowns */
+    uint64_t invulnerable_until, knock_until, knock_last, stagger_until, flash_until;
+    float knock_dx, knock_dz;
+    float dash_last[3]; uint64_t dash_t, dash_shown; unsigned dash_hit[LAO_PLAYERS], dash_seq; int dashing;
+    int sent_on, sent_id;  /* (players 2..8: the switch his connection last sent, and as which relay id) */
+} PvpSelf;
+static PvpSelf g_pvp[PVP_SELVES];
+static atomic_int pvp_toggle_req[PVP_SELVES];  /* (players 2..8: their R3; Player 1's is key_f6, F6 too) */
+static unsigned shot_seq;
+static uint64_t ko_watch_until;  /* the game's hearts at 0 from a PvP hit: waiting for its death (pvp_tick) */
+static void pvp_selves_reset(void) {
+    memset(g_pvp, 0, sizeof g_pvp);
+    for (int s = 0; s < PVP_SELVES; s++) g_pvp[s].face_z = 1, g_pvp[s].sent_on = g_pvp[s].sent_id = -1, atomic_store(&pvp_toggle_req[s], 0);
+}
+static int pvp_cooldown_ok(PvpSelf *p, int item, uint64_t now) {
+    int ms = pvp_cooldown_ms(item); if (item < 0 || item >= 128) return 1;
+    if (now < p->ready_at[item]) return 0;
+    p->ready_at[item] = now + (uint64_t)ms; return 1;
+}
 int laonline_v12_effects(int *item, float pos[][3], float dir[][2], float *age_s, uint16_t *map, int cap) {  /* overlay */
     int n = 0; uint64_t now = ms_now();
     pthread_mutex_lock(&mx);
@@ -936,97 +957,319 @@ int laonline_v12_effects(int *item, float pos[][3], float dir[][2], float *age_s
     pthread_mutex_unlock(&mx);
     return n;
 }
-static float face_x = 0, face_z = 1, last_me[3]; static int have_last;
-static uint64_t stagger_until, flash_until;
 /* V13.5 hit reaction (we can't call the game's own knockback yet): a short stagger - your stick is ignored for a
- * moment - a red screen flash and a controller rumble. Read by input.c and the overlay. */
-int laonline_v12_stagger(void) { return ms_now() < stagger_until; }
-float laonline_v12_hit_flash(void) { uint64_t n = ms_now(); return n < flash_until ? (float)(flash_until - n) / 450.f : 0.f; }
-static unsigned swing_id;
+ * moment - a red screen flash and a controller rumble. Read by input.c and the overlay. (Players 2..8: their stick,
+ * input.c coop_fill; the flash and the rumble are Player 1's screen and pad.) */
+int laonline_v12_stagger(void) { return ms_now() < g_pvp[0].stagger_until; }
+int laonline_v12_stagger_of(int s) { return s >= 0 && s < PVP_SELVES && ms_now() < g_pvp[s].stagger_until; }
+float laonline_v12_hit_flash(void) { uint64_t n = ms_now(); return n < g_pvp[0].flash_until ? (float)(g_pvp[0].flash_until - n) / 450.f : 0.f; }
 void laonline_v12_key(int fkey, int down, int repeat) {
     if (fkey == 6 && down && !repeat) atomic_store(&key_f6, 1);
     if (fkey == 7) atomic_store(&key_f7_down, down ? 1 : 0);
     if (fkey == 8 && down && !repeat) { extern void ztarget_toggle(void); ztarget_toggle(); }  /* F8: Z-target (V15) */
 }
-uint64_t laonline_v12_input(uint64_t buttons, int menu) {
-    uint64_t now = ms_now(), pressed = buttons & ~prev_buttons, released = prev_buttons & ~buttons;
-    prev_buttons = buttons;
-    if (menu) { r3_since = 0; return buttons; }
-    if (pressed & (1ull << 1)) { swing_until = now + 260; swing_id++; }  /* B: sword */
-    if (pressed & (1ull << 1)) b_down_at = now;
-    if (released & (1ull << 1)) {  /* V14: B held 0.8 s+ then let go = spin attack */
-        if (b_down_at && now - b_down_at >= 800 && atomic_load(&pvp_local)) { pthread_mutex_lock(&mx); spin_req = 1; pthread_mutex_unlock(&mx); }
-        b_down_at = 0;
-    }
+/* The buttons of this PC's player s as the game is given them: B a sword swing (held 0.8 s and let go: a spin
+ * attack), X / Y the item there, R3 a tap his PvP switch. */
+static void pvp_input(int s, uint64_t buttons, int menu) {
+    PvpSelf *p = &g_pvp[s];
+    uint64_t now = ms_now(), pressed = buttons & ~p->prev_buttons, released = p->prev_buttons & ~buttons;
+    p->prev_buttons = buttons;
+    if (menu) { p->r3_since = 0; return; }
+    int on = atomic_load(&pvp_on_of[s]);
+    if (pressed & (1ull << 1)) { p->swing_until = now + 260; p->swing_id++; }  /* B: sword */
     pthread_mutex_lock(&mx);
-    if (pressed & (1ull << 2)) x_down_at = now;
-    if (released & (1ull << 2)) x_down_at = 0;
-    if (pressed & (1ull << 3)) y_down_at = now;
-    if (released & (1ull << 3)) y_down_at = 0;
+    if (pressed & (1ull << 1)) p->b_down_at = now;
+    if (released & (1ull << 1)) {  /* V14: B held 0.8 s+ then let go = spin attack */
+        if (p->b_down_at && now - p->b_down_at >= 800 && on) p->spin_req = 1;
+        p->b_down_at = 0;
+    }
+    if (pressed & (1ull << 2)) p->x_down_at = now;
+    if (released & (1ull << 2)) p->x_down_at = 0;
+    if (pressed & (1ull << 3)) p->y_down_at = now;
+    if (released & (1ull << 3)) p->y_down_at = 0;
+    /* V13.5 PvP: X / Y - which item is equipped there is read on the game thread */
+    if ((pressed & (3ull << 2)) && on && p->item_press_n < 4) p->item_press_slot[p->item_press_n++] = (pressed & (1ull << 2)) ? 0xa3 : 0xa2;
     pthread_mutex_unlock(&mx);
-    if ((pressed & (7ull << 1)) && atomic_load(&pvp_local)) research_press_ms = now;  /* B / X / Y: see actor_created */
-    if (pressed & (3ull << 2)) {  /* V13.5 PvP: X / Y - which item is equipped there is read on the game thread */
-        int slot = (pressed & (1ull << 2)) ? 0xa3 : 0xa2;
-        pthread_mutex_lock(&mx);
-        if (atomic_load(&pvp_local) && item_press_n < 4) { item_press_slot[item_press_n] = slot; item_press_at[item_press_n++] = now; }
-        pthread_mutex_unlock(&mx);
+    if (!s && (pressed & (7ull << 1)) && on) research_press_ms = now;  /* B / X / Y: see actor_created */
+    if (pressed & (1ull << 5)) p->r3_since = now;                      /* R3 */
+    if ((released & (1ull << 5)) && p->r3_since) {
+        if (now - p->r3_since < 450 && pvp_mode() && cfg_pvp) atomic_store(s ? &pvp_toggle_req[s] : &key_f6, 1);
+        p->r3_since = 0;
     }
-    if (pressed & (1ull << 4)) { extern void ztarget_toggle(void); ztarget_toggle(); }  /* L3: Z-target (V15; ZL too) */
-    if (pressed & (1ull << 5)) r3_since = now;                           /* R3 */
-    if ((released & (1ull << 5)) && r3_since) {
-        if (now - r3_since < 450 && pvp_mode() && cfg_pvp) atomic_store(&key_f6, 1);
-        r3_since = 0;
-    }
+}
+uint64_t laonline_v12_input(uint64_t buttons, int menu) {  /* Player 1 (input.c) */
+    uint64_t pressed = buttons & ~g_pvp[0].prev_buttons;
+    pvp_input(0, buttons, menu);
+    if (!menu && (pressed & (1ull << 4))) { extern void ztarget_toggle(void); ztarget_toggle(); }  /* L3: Z-target (V15; ZL too) */
     return buttons;
+}
+/* (LAS Recomp Co-Op's port) players 2..8 (input.c coop_fill: player = 1 for player 2) */
+uint64_t laonline_v12_input_of(int s, uint64_t buttons, int menu) {
+    if (s >= 1 && s < PVP_SELVES) pvp_input(s, buttons, menu);
+    return buttons;
+}
+/* (LAS Recomp Co-Op's port) a PvP hit on player s (1..7) of this PC, from his own connection (laonline_local.c) */
+void laonline_v12_hit_for(int s, int from, int quarters) {
+    if (s < 1 || s >= PVP_SELVES || from < 0 || from >= LAO_PLAYERS) return;
+    pthread_mutex_lock(&mx);
+    if (hit_n[s] < 16) hit_from[s][hit_n[s]] = from, hit_amount[s][hit_n[s]++] = (uint8_t)quarters;
+    pthread_mutex_unlock(&mx);
 }
 
 /* ------------------------------------------------------------------ PvP (game thread) */
-int laonline_v12_pvp_local(void) { return pvp_mode() && atomic_load(&pvp_local); }
+int laonline_v12_pvp_local(void) { return pvp_mode() && atomic_load(&pvp_on_of[0]); }
+int laonline_v12_pvp_on(int s) { return pvp_mode() && s >= 0 && s < PVP_SELVES && atomic_load(&pvp_on_of[s]); }  /* (ztarget.c) */
 int laonline_v12_pvp_peer(int id) { return pvp_mode() && id >= 0 && id < LAO_PLAYERS && atomic_load(&pvp_peer[id]); }
-static unsigned hit_swing[LAO_PLAYERS];
-static uint64_t invulnerable_until, ko_watch_until;
 /* V15.1 (Velvet: "the heart on the HUD looks kind of funny", "sometimes when I die, it doesn't trigger the death
  * animation"): Link's hearts live twice - the save (what the HUD's saved value / Game Over read) and PlayerStatus+0x84
  * (what the game plays with: Link's death, heart pickups). PvP wrote only the save, so the two disagreed (6 -> 10 in
- * Sanic's log) and a KO could reach the Game Over without the game's own death. Both are written now. */
+ * Sanic's log) and a KO could reach the Game Over without the game's own death. (LAS Recomp Co-Op's port: PlayerStatus
+ * is in the live save itself - its +0x84 is the save's 0x5544, docs/save-format.md - so it is the one value, taken as
+ * the game's own damage takes it: pvp_take.) */
 static uint64_t pvp_status(void) {
     uint64_t ps = g_ga && GA(PLAYER_STATUS_PTR) ? LD64(GA(PLAYER_STATUS_PTR)) : 0;
     return ps && ((ps >= MAIN_BASE && ps + 0x100 < SDK_BASE) || (ps >= HEAP_BASE && ps + 0x100 < HEAP_BASE + HEAP_MAX)) ? ps : 0;
 }
 static int pvp_hp(void) { uint64_t ps = pvp_status(); return ps ? (int16_t)LD16(ps + 0x84) : (int16_t)LD16(SAVE + HP); }
-static void pvp_set_hp(int v) { uint64_t ps = pvp_status(); if (ps) ST16(ps + 0x84, (uint16_t)v); ST16(SAVE + HP, (uint16_t)v); }
-/* V15.1 (Mr. Cursey: "We can also attack while dead"): no attacks while your hearts are 0 / the game's death runs */
-static int pvp_self_down(void) { extern int laonline_death_active(void); return !save_ready() || pvp_hp() <= 0 || ko_watch_until || laonline_death_active(); }
+/* (LAS Recomp Co-Op's port) A PvP hit of `q` quarter hearts on this PC's player s, taken as the game takes its own hits
+ * (LAS Recomp's review, point 2: no hearts written of its own): the difficulty setting first (rt_damage: Hero Mode
+ * doubles it), then local co-op's split (rt_coop_damage_of, as at the game's damage sites: with "own hearts" a player
+ * 2..8's hit comes off his own and knocks him out at 0, for a revive), then what is left off the game's hearts as its
+ * damage command takes it (main+0xd7c870: PlayerStatus+0x84 less the hit, not below 0). keep_one: a relay without
+ * knock-outs (older than V13.5) - the game's hearts stop at a quarter heart, as V15.2 had it. Returns the game's hearts
+ * after (-1: not touched). */
+static int pvp_take(struct Cpu *c, int s, int q, int keep_one) {
+    extern int32_t rt_damage(int32_t, int32_t); extern int rt_hero_mode(void);
+    extern int32_t rt_coop_damage_of(struct Cpu *, int32_t, uint64_t); extern uint64_t coop_player(int);
+    int dmg = rt_coop_damage_of(c, rt_damage(q, rt_hero_mode()), coop_player(s));
+    uint64_t ps = pvp_status();
+    if (dmg <= 0 || !ps) return -1;
+    int hp = (int16_t)LD16(ps + 0x84), next = hp - dmg < 0 ? 0 : hp - dmg;
+    if (keep_one && next < 1) next = hp < 1 ? hp : 1;
+    ST16(ps + 0x84, (uint16_t)next);
+    return next;
+}
+/* V15.1 (Mr. Cursey: "We can also attack while dead"): no attacks while your hearts are 0 / the game's death runs
+ * (players 2..8 with their own hearts: while knocked out) */
+static int pvp_self_down(int s) {
+    extern int laonline_death_active(void), coop_player_down(int);
+    return !save_ready() || pvp_hp() <= 0 || ko_watch_until || laonline_death_active() || (s && coop_player_down(s));
+}
+/* (LAS Recomp Co-Op's port) this PC's player s: his Link's PlayerCollision (his position at +0x80) - Player 1's as
+ * V15.2 found it, the others' as laonline_local.c does; 0: not in the game */
+static uint64_t self_collision(int s, uint64_t frame) {
+    extern uint64_t doorjump_player(uint64_t frame), coop_player(int); extern uint32_t coop_joined(void);
+    if (!s) return doorjump_player(frame);
+    if (!(coop_joined() >> s & 1)) return 0;
+    uint64_t link = coop_player(s), col = link ? LD64(link + 0x80) : 0;
+    return col >= HEAP_BASE && col < HEAP_BASE + HEAP_MAX - 0xc0 && LD64(col) == GA(PLAYER_COLLISION_VT) ? col : 0;
+}
+static int self_relay_id(int s) {  /* (-1: not on the relay) */
+    extern int laonline_local_relay_id(int);
+    if (s) return laonline_local_relay_id(s);
+    float tmp[3]; uint16_t tm; int my_id = -1;
+    for (int id = 0; id < LAO_PLAYERS && my_id < 0; id++) { int l = -1; if (laonline_v12_peer(id, tmp, &tm, &l)) my_id = l; }
+    return my_id;
+}
+static int pvp_send(int s, const uint8_t *f, int n) {  /* (mx held) Player 1's connection or player s's own */
+    extern int laonline_local_push(int, const uint8_t *, int);
+    return s ? laonline_local_push(s, f, n) : push_frame(f, n);
+}
 /* V15 PvP hit reaction (user's videos: Link gets knocked back like an enemy hit): pushed away from the attacker for
  * 0.25 s (PlayerCollision position, as souls.c moves him), turned to face the attacker, the game's own damage animation
  * once it was learned from an enemy hit (runtime/hle/ztarget.c), plus the V13.5 stagger / red flash / rumble. */
-static uint64_t knock_until, knock_last; static float knock_dx, knock_dz;
-static void knock_tick(uint64_t frame) {
-    if (!knock_until) return;
+static void knock_tick(int s, uint64_t frame) {
+    PvpSelf *p = &g_pvp[s];
+    if (!p->knock_until) return;
     uint64_t now = ms_now();
-    if (now >= knock_until) { knock_until = 0; return; }
-    extern uint64_t doorjump_player(uint64_t frame);
-    uint64_t pc = doorjump_player(frame);
+    if (now >= p->knock_until) { p->knock_until = 0; return; }
+    uint64_t pc = self_collision(s, frame);
     if (!pc) return;
-    float dt = (float)(now - knock_last) / 1000.f; knock_last = now;
+    float dt = (float)(now - p->knock_last) / 1000.f; p->knock_last = now;
     if (dt <= 0 || dt > .1f) return;
     float *pos = (float *)(uintptr_t)(pc + 0x80), *pos2 = (float *)(uintptr_t)(pc + 0xb0), speed = 6.4f;  /* ~1.6 in 0.25 s */
-    pos[0] = pos2[0] = pos[0] + knock_dx * speed * dt;
-    pos[2] = pos2[2] = pos[2] + knock_dz * speed * dt;
+    pos[0] = pos2[0] = pos[0] + p->knock_dx * speed * dt;
+    pos[2] = pos2[2] = pos[2] + p->knock_dz * speed * dt;
+}
+/* The hits player s took (from the relay: who, how much), taken as the game's own (pvp_take). */
+static void pvp_hits(struct Cpu *c, int s, uint64_t frame, const float me[3], int have_me, int ko_ok, uint64_t now) {
+    PvpSelf *p = &g_pvp[s];
+    int amounts[16], froms[16], n;
+    pthread_mutex_lock(&mx);
+    n = hit_n[s]; for (int i = 0; i < n; i++) amounts[i] = hit_amount[s][i], froms[i] = hit_from[s][i]; hit_n[s] = 0;
+    pthread_mutex_unlock(&mx);
+    extern int coop_player_down(int);
+    for (int i = 0; i < n; i++) {
+        if (!atomic_load(&pvp_on_of[s]) || (s && !have_me) || !save_ready() || laonline_ui_paused() || now < p->invulnerable_until ||
+            pvp_self_down(s)) continue;  /* (players 2..8: only while in the game and on the relay) */
+        int hp = pvp_hp();
+        if (hp <= 0 || (hp <= 1 && !ko_ok)) continue;
+        int dmg = amounts[i] < 1 ? 1 : amounts[i] > 8 ? 8 : amounts[i];
+        if (!s) { extern void ztarget_note_pvp_hit(void); ztarget_note_pvp_hit(); }
+        int after = pvp_take(c, s, dmg, !ko_ok);
+        int knocked = (s && coop_player_down(s)) || after == 0;
+        if (knocked) {
+            /* V13.5 PvP death (user: "an actual death animation and gameover"): hearts go to 0 like any lethal hit, so
+             * the game itself plays Link's death and its Game Over (or a bottled fairy saves him - the game decides).
+             * The attacker gets the kill (kill feed + counter). Safety net: if the game has NOT started its Game Over
+             * within 6 s while the hearts are still 0, Link is put back at full hearts (never stuck at 0). (Players
+             * 2..8 with their own hearts: knocked out as co-op does, for a revive.) */
+            p->knock_until = 0;  /* (nothing of ours in the way of the game's death) */
+            if (after == 0) ko_watch_until = now + 6000;
+            p->invulnerable_until = now + 6000;
+            p->stagger_until = now + 400;
+            if (!s) { p->flash_until = now + 1200; extern void input_hit_rumble(int ms); input_hit_rumble(600); }
+            uint8_t f[5] = {3, 0, LAO_C_PVP, 3, (uint8_t)froms[i]};
+            pthread_mutex_lock(&mx); pvp_send(s, f, 5); pthread_mutex_unlock(&mx);
+            LOG("[laonline] V13.5 PvP: player %d knocked out by player #%d's hit%s\n", s + 1, froms[i],
+                after == 0 ? " - waiting for the game's death / Game Over" : " (co-op: down for a revive)");
+            dev_events_emit("PVP", "V135_PVP_DEATH", "PvP", 0, dmg, hp, 0, "HEALTH_WRITE", "REMOTE", 0);
+            continue;
+        }
+        p->invulnerable_until = now + 1000;  /* V15.1: about the game's own invincibility after a hit (was 0.7 s) */
+        p->stagger_until = now + 250;
+        if (!s) p->flash_until = now + 450;
+        { extern int ztarget_yaw_toward(float, float, float *); extern uint16_t ztarget_damage_anim(void);
+          extern int laonline_link_set_yaw(struct Cpu *, uint64_t, float); extern int laonline_local_play_anim(struct Cpu *, uint16_t);
+          extern uint64_t coop_player(int);
+          float ap[3]; uint16_t amap; int alocal;
+          if (have_me && laonline_v12_peer(froms[i], ap, &amap, &alocal)) {
+              float dx = me[0] - ap[0], dz = me[2] - ap[2], d = sqrtf(dx * dx + dz * dz), yaw;
+              if (d > .05f) { p->knock_dx = dx / d; p->knock_dz = dz / d; p->knock_until = now + 250; p->knock_last = now;
+                  if (ztarget_yaw_toward(-dx, -dz, &yaw)) laonline_link_set_yaw(c, coop_player(s), yaw); }  /* face the one who hit him */
+          }
+          uint16_t anim = !s && cfg_pvp_anim ? ztarget_damage_anim() : 0;  /* V15.1: off by default (it froze Link) */
+          if (anim && laonline_local_play_anim(c, anim)) LOG("[laonline] V15 PvP hit: played Link's damage animation %u\n", anim);
+        }
+        if (!s) { extern void input_hit_rumble(int ms); input_hit_rumble(220); }
+        if (!s) laonline_notify(dmg >= 4 ? "PvP: you were hit! (-1 heart)" : dmg >= 2 ? "PvP: you were hit! (-1/2 heart)" : "PvP: you were hit! (-1/4 heart)");
+        else { char t[64]; snprintf(t, sizeof t, "PvP: P%d was hit! (-%s heart)", s + 1, dmg >= 4 ? "1" : dmg >= 2 ? "1/2" : "1/4"); laonline_notify(t); }
+        LOG("[laonline] PvP: player %d hit by player #%d for %d/4 (the game's hearts %d -> %d)\n", s + 1, froms[i], dmg, hp, after < 0 ? hp : after);
+        dev_events_emit("PVP", "V12_PVP_HIT_TAKEN", "PvP", 0, dmg, hp, after < 0 ? hp : after, "HEALTH_WRITE", "REMOTE", 0);
+    }
+    (void)frame;
+}
+/* The attacks player s makes: each one (1) everyone else is sent what to DRAW (kind 2 visual frame) and (2) after its
+ * delay we check who it reaches and send the hit (kind 1, with damage) for the server to pass on - on his own
+ * connection, so the relay names him the attacker. */
+static void pvp_attacks(int s, const float me[3], uint16_t my_map, int my_id, int sword_lv, uint64_t ps, uint64_t now) {
+    PvpSelf *p = &g_pvp[s];
+    int presses[4]; int pn; pthread_mutex_lock(&mx); pn = p->item_press_n; memcpy(presses, p->item_press_slot, sizeof presses); p->item_press_n = 0; pthread_mutex_unlock(&mx);
+    if (pvp_self_down(s)) {  /* V15.1: knocked out - nothing you press reaches anyone, queued attacks are dropped */
+        p->shot_n = 0; p->swing_until = 0;
+        pthread_mutex_lock(&mx); p->spin_req = 0; pthread_mutex_unlock(&mx);
+        return;
+    }
+    #define PVP_SHOW(item_) do { if (relay_pvp135) { \
+        uint8_t f_[21] = {19, 0, LAO_C_PVP, 2, (uint8_t)(item_)}; memcpy(f_ + 5, &my_map, 2); memcpy(f_ + 7, me, 12); \
+        f_[19] = (uint8_t)(int8_t)lrintf(p->face_x * 100.f); f_[20] = (uint8_t)(int8_t)lrintf(p->face_z * 100.f); \
+        pthread_mutex_lock(&mx); pvp_send(s, f_, 21); pthread_mutex_unlock(&mx); } } while (0)
+    #define PVP_QUEUE(a_, q_) do { if (p->shot_n < 8) p->shots[p->shot_n++] = (PvpShot){(a_), now + (uint64_t)(a_)->delay_ms, now, me[0], me[1], me[2], p->face_x, p->face_z, ++shot_seq, (q_)}; } while (0)
+    #define PVP_HIT(id_, q_, item_) do { \
+        uint8_t f_[7] = {5, 0, LAO_C_PVP, 1, (uint8_t)(id_), (uint8_t)(q_), (uint8_t)(item_)};  /* V15: + the weapon (kill feed) */ \
+        pthread_mutex_lock(&mx); if (!relay_pvpcoop) f_[0] = 4; pvp_send(s, f_, relay_pvpcoop ? 7 : 6); if (!relay_pvpko) hitmark_add(my_id, (id_), (q_)); pthread_mutex_unlock(&mx); } while (0)
+    for (int i = 0; i < pn; i++) {
+        int item = LD8(ps + presses[i]);
+        const PvpAttack *a = NULL;
+        for (unsigned k = 0; k < sizeof k_pvp_items / sizeof *k_pvp_items; k++) if (k_pvp_items[k].item == item) a = &k_pvp_items[k];
+        if (!a) {
+            if (item == 9 && pvp_cooldown_ok(p, PVP_STOMP, now)) { PVP_QUEUE(pvp_move(PVP_STOMP), 2); PVP_SHOW(PVP_STOMP); }  /* Roc's Feather: land on them */
+            continue;
+        }
+        /* Bow + Bombs pressed together (within 0.25 s, either order) = a bomb arrow */
+        int combo = -1;
+        for (int s2 = 0; s2 < p->shot_n; s2++)
+            if (now - p->shots[s2].made <= 250 && now < p->shots[s2].at &&
+                ((item == 3 && p->shots[s2].a->item == 2) || (item == 2 && p->shots[s2].a->item == 3))) combo = s2;
+        if (combo >= 0) {
+            p->shots[combo] = p->shots[--p->shot_n];
+            PVP_QUEUE(pvp_move(PVP_BOMB_ARROW), 6); PVP_SHOW(PVP_BOMB_ARROW);
+            continue;
+        }
+        if (!pvp_cooldown_ok(p, item, now)) continue;  /* V15.1: still out / reloading - no new hit */
+        PVP_QUEUE(a, a->quarters); PVP_SHOW(item);
+    }
+    /* sword: a slash everyone sees (the hit itself is the swing check below) */
+    if (now <= p->swing_until && p->shown_swing != p->swing_id) { p->shown_swing = p->swing_id; PVP_SHOW(PVP_SWORD); }
+    /* spin attack: B charged and let go */
+    int spin; pthread_mutex_lock(&mx); spin = p->spin_req; p->spin_req = 0; pthread_mutex_unlock(&mx);
+    if (spin) { PVP_QUEUE(pvp_move(PVP_SPIN), 4 * sword_lv); PVP_SHOW(PVP_SPIN); }
+    /* Pegasus Boots dash: the boots button held 0.35 s+ while Link is running fast -> rams whoever is in front */
+    uint64_t xd, yd; pthread_mutex_lock(&mx); xd = p->x_down_at; yd = p->y_down_at; pthread_mutex_unlock(&mx);
+    int boots_held = (xd && now - xd >= 350 && LD8(ps + 0xa3) == 11) || (yd && now - yd >= 350 && LD8(ps + 0xa2) == 11);
+    float speed = 0;
+    if (p->dash_t && now > p->dash_t) { float dx = me[0] - p->dash_last[0], dz = me[2] - p->dash_last[2]; speed = sqrtf(dx * dx + dz * dz) * 1000.f / (float)(now - p->dash_t); }
+    memcpy(p->dash_last, me, 12); p->dash_t = now;
+    int dash_now = boots_held && speed > 4.f && speed < 60.f;
+    if (dash_now && !p->dashing) p->dash_seq++;
+    p->dashing = dash_now;
+    if (p->dashing) {
+        if (now - p->dash_shown > 300) { p->dash_shown = now; PVP_SHOW(PVP_DASH); }
+        for (int id = 0; id < LAO_PLAYERS && relay_pvp135; id++) {
+            float o[3]; uint16_t map; int local;
+            if (!atomic_load(&pvp_peer[id]) || p->dash_hit[id] == p->dash_seq || !laonline_v12_peer(id, o, &map, &local) || id == local || map != my_map) continue;
+            float dx = o[0] - me[0], dz = o[2] - me[2], d = sqrtf(dx * dx + dz * dz);
+            if (d > 1.7f || fabsf(o[1] - me[1]) > 1.5f || (d > .3f && (dx * p->face_x + dz * p->face_z) / d < .3f)) continue;
+            p->dash_hit[id] = p->dash_seq;
+            PVP_HIT(id, LD32(SAVE + ITEMS) & 1 ? 4 * sword_lv : 2, PVP_DASH);
+            LOG("[laonline] V14 PvP Boots dash (player %d) reached player #%d\n", s + 1, id);
+        }
+    }
+    for (int k = 0; k < p->shot_n;) {
+        if (now < p->shots[k].at) { k++; continue; }
+        PvpShot sh = p->shots[k]; p->shots[k] = p->shots[--p->shot_n];
+        if (!relay_pvp135) continue;  /* older server: sword only */
+        float cx = sh.x + sh.fx * sh.a->ahead, cz = sh.z + sh.fz * sh.a->ahead;  /* (a bomb: where it was put down) */
+        for (int id = 0; id < LAO_PLAYERS; id++) {
+            if (!atomic_load(&pvp_peer[id])) continue;
+            float o[3]; uint16_t map; int local;
+            if (!laonline_v12_peer(id, o, &map, &local) || id == local || map != my_map) continue;
+            float dx = o[0] - cx, dy = o[1] - sh.y, dz = o[2] - cz, d = sqrtf(dx * dx + dz * dz);
+            if (d > sh.a->range || fabsf(dy) > 2.f) continue;
+            if (sh.a->cone > -1.5f && d > .5f && (dx * sh.fx + dz * sh.fz) / d < sh.a->cone) continue;  /* not in front */
+            int q = sh.quarters < 1 ? 1 : sh.quarters > 8 ? 8 : sh.quarters;
+            PVP_HIT(id, q, sh.a->item);
+            LOG("[laonline] V13.5 PvP %s (player %d) reached player #%d\n", sh.a->name, s + 1, id);
+        }
+    }
+    if (now <= p->swing_until)
+        for (int id = 0; id < LAO_PLAYERS; id++) {
+            if (!atomic_load(&pvp_peer[id]) || p->hit_swing[id] == p->swing_id) continue;
+            float o[3]; uint16_t map; int local;
+            if (!laonline_v12_peer(id, o, &map, &local) || id == local || map != my_map) continue;
+            float dx = o[0] - me[0], dy = o[1] - me[1], dz = o[2] - me[2];
+            if (dx * dx + dz * dz > 1.9f * 1.9f || fabsf(dy) > 1.5f) continue;
+            p->hit_swing[id] = p->swing_id;
+            if (relay_pvp135) PVP_HIT(id, 2 * sword_lv, PVP_SWORD);  /* V14: sword damage by level (Noble Sword = 1 heart) */
+            else {
+                uint8_t f[5] = {3, 0, LAO_C_PVP, 1, (uint8_t)id};
+                pthread_mutex_lock(&mx); pvp_send(s, f, 5); if (!relay_pvpko) hitmark_add(my_id, id, 2 * sword_lv); pthread_mutex_unlock(&mx);
+            }
+            LOG("[laonline] V12 PvP swing (player %d) reached player #%d\n", s + 1, id);
+        }
+    #undef PVP_SHOW
+    #undef PVP_QUEUE
+    #undef PVP_HIT
+}
+static int self_ids[PVP_SELVES];  /* (each frame: self_relay_id) */
+static int pvp_self_of_id(int id) {  /* this PC's player whose relay id this is (-1: someone else's) */
+    for (int s = 0; s < PVP_SELVES; s++) if (id >= 0 && self_ids[s] == id) return s;
+    return -1;
 }
 static void pvp_tick(struct Cpu *c, uint64_t frame, const char *level, const float me[3], int have_me) {
-    if (atomic_exchange(&key_f6, 0) && cfg_pvp) {
-        if (!pvp_mode()) laonline_notify("PvP is available when you play online.");
-        else {
-            int on = !atomic_load(&pvp_local);
-            atomic_store(&pvp_local, on);
-            int relay;
-            pthread_mutex_lock(&mx); relay = relay_v12 && (global_mode() || relay_pvpcoop); pthread_mutex_unlock(&mx);
-            laonline_notify(on ? (relay ? "PvP ON - red players can hit each other. R3 / F6 turns it off."
-                                        : "PvP ON - but this server is not updated for PvP yet (host: update the relay).")
-                               : "PvP OFF");
-            LOG("[laonline] V12 PvP %s\n", on ? "on" : "off");
-        }
+    for (int s = 0; s < PVP_SELVES; s++) {  /* each player's PvP switch: Player 1's R3 / F6, the others' R3 */
+        if (!(s ? atomic_exchange(&pvp_toggle_req[s], 0) : atomic_exchange(&key_f6, 0)) || !cfg_pvp) continue;
+        if (!pvp_mode()) { laonline_notify("PvP is available when you play online."); continue; }
+        int on = !atomic_load(&pvp_on_of[s]);
+        atomic_store(&pvp_on_of[s], on);
+        int relay;
+        pthread_mutex_lock(&mx); relay = relay_v12 && (global_mode() || relay_pvpcoop); pthread_mutex_unlock(&mx);
+        char t[96];
+        if (s) snprintf(t, sizeof t, "P%d: PvP %s", s + 1, on ? "ON" : "OFF");
+        laonline_notify(s ? t : on ? (relay ? "PvP ON - red players can hit each other. R3 / F6 turns it off."
+                                            : "PvP ON - but this server is not updated for PvP yet (host: update the relay).")
+                                   : "PvP OFF");
+        LOG("[laonline] V12 PvP %s (player %d)\n", on ? "on" : "off", s + 1);
     }
     if (!pvp_mode()) { atomic_store(&ending_req, 0); return; }
     if (!global_mode()) atomic_store(&ending_req, 0);  /* (the "saved Koholint" announcement is Global's) */
@@ -1042,55 +1285,31 @@ static void pvp_tick(struct Cpu *c, uint64_t frame, const char *level, const flo
             LOG("[laonline] V14 Global: you finished the game - telling everyone in Global\n");
         }
     }
-    int amounts[16], froms[16], n, ko_ok;
+    int ko_ok, pvp_ok;
     pthread_mutex_lock(&mx);
-    n = hit_n; for (int i = 0; i < n; i++) amounts[i] = hit_amount[i], froms[i] = hit_from[i]; hit_n = 0;
     ko_ok = relay_pvpko;
+    pvp_ok = relay_v12 && (global_mode() || relay_pvpcoop);  /* (as laonline_v12_packet sends Player 1's) */
     pthread_mutex_unlock(&mx);
     uint64_t now = ms_now();
-    for (int i = 0; i < n; i++) {  /* we were hit */
-        if (!atomic_load(&pvp_local) || !save_ready() || laonline_ui_paused() || now < invulnerable_until) continue;
-        int hp = pvp_hp();
-        if (hp <= 0 || (hp <= 1 && !ko_ok)) continue;
-        int dmg = amounts[i] < 1 ? 1 : amounts[i] > 8 ? 8 : amounts[i];
-        if (ko_ok && hp - dmg <= 0) {
-            /* V13.5 PvP death (user: "an actual death animation and gameover"): hearts go to 0 like any lethal hit, so
-             * the game itself plays Link's death and its Game Over (or a bottled fairy saves him - the game decides).
-             * The attacker gets the kill (kill feed + counter). Safety net: if the game has NOT started its Game Over
-             * within 6 s while the hearts are still 0, Link is put back at full hearts (never stuck at 0). */
-            { extern void ztarget_note_pvp_hit(void); ztarget_note_pvp_hit(); }
-            pvp_set_hp(0);
-            knock_until = 0;  /* (nothing of ours in the way of the game's death) */
-            ko_watch_until = now + 6000;
-            invulnerable_until = now + 6000;
-            stagger_until = now + 400; flash_until = now + 1200;
-            { extern void input_hit_rumble(int ms); input_hit_rumble(600); }
-            uint8_t f[5] = {3, 0, LAO_C_PVP, 3, (uint8_t)froms[i]};
-            pthread_mutex_lock(&mx); push_frame(f, 5); pthread_mutex_unlock(&mx);
-            LOG("[laonline] V13.5 PvP: hearts 0 from player #%d's hit - waiting for the game's death / Game Over\n", froms[i]);
-            dev_events_emit("PVP", "V135_PVP_DEATH", "PvP", 0, dmg, hp, 0, "HEALTH_WRITE", "REMOTE", 0);
-            continue;
-        }
-        int next = hp - dmg < 1 ? 1 : hp - dmg;  /* older server: knock-outs stop at a quarter heart */
-        { extern void ztarget_note_pvp_hit(void); ztarget_note_pvp_hit(); }
-        pvp_set_hp(next);
-        invulnerable_until = now + 1000;  /* V15.1: about the game's own invincibility after a hit (was 0.7 s) */
-        stagger_until = now + 250; flash_until = now + 450;
-        { extern void ztarget_note_pvp_hit(void); extern int ztarget_yaw_toward(float, float, float *); extern uint16_t ztarget_damage_anim(void);
-          extern int laonline_local_set_yaw(struct Cpu *, float); extern int laonline_local_play_anim(struct Cpu *, uint16_t);
-          ztarget_note_pvp_hit();
-          float ap[3]; uint16_t amap; int alocal;
-          if (have_me && laonline_v12_peer(froms[i], ap, &amap, &alocal)) {
-              float dx = me[0] - ap[0], dz = me[2] - ap[2], d = sqrtf(dx * dx + dz * dz), yaw;
-              if (d > .05f) { knock_dx = dx / d; knock_dz = dz / d; knock_until = now + 250; knock_last = now;
-                  if (ztarget_yaw_toward(-dx, -dz, &yaw)) laonline_local_set_yaw(c, yaw); }  /* face the one who hit him */
-          }
-          uint16_t anim = cfg_pvp_anim ? ztarget_damage_anim() : 0;  /* V15.1: off by default (it froze Link) */
-          if (anim && laonline_local_play_anim(c, anim)) LOG("[laonline] V15 PvP hit: played Link's damage animation %u\n", anim);
-        }
-        { extern void input_hit_rumble(int ms); input_hit_rumble(220); }
-        laonline_notify(dmg >= 4 ? "PvP: you were hit! (-1 heart)" : dmg >= 2 ? "PvP: you were hit! (-1/2 heart)" : "PvP: you were hit! (-1/4 heart)");
-        dev_events_emit("PVP", "V12_PVP_HIT_TAKEN", "PvP", 0, dmg, hp, next, "HEALTH_WRITE", "REMOTE", 0);
+    /* where each of this PC's players is: Player 1 as V15.2 had him (me), the others their Link's collision */
+    float pos[PVP_SELVES][3]; int here[PVP_SELVES];
+    for (int s = 0; s < PVP_SELVES; s++) {
+        uint64_t col = s ? self_collision(s, frame) : 0;
+        self_ids[s] = self_relay_id(s);
+        here[s] = s ? col && self_ids[s] >= 0 : have_me;
+        if (!s && have_me) memcpy(pos[0], me, 12);
+        else if (col) memcpy(pos[s], (const float *)(uintptr_t)(col + 0x80), 12);
+    }
+    /* players 2..8: each one's switch to his own connection (again for a new connection: a new relay id) */
+    for (int s = 1; s < PVP_SELVES; s++) {
+        int id = self_ids[s], on = atomic_load(&pvp_on_of[s]);
+        if (id < 0 || !pvp_ok || (on == g_pvp[s].sent_on && id == g_pvp[s].sent_id)) continue;
+        uint8_t f[5] = {3, 0, LAO_C_PVP, 0, (uint8_t)on};
+        int sent; pthread_mutex_lock(&mx); sent = pvp_send(s, f, 5); pthread_mutex_unlock(&mx);
+        if (sent) g_pvp[s].sent_on = on, g_pvp[s].sent_id = id;
+    }
+    for (int s = 0; s < PVP_SELVES; s++) {
+        pvp_hits(c, s, frame, pos[s], here[s], ko_ok, now);
     }
     if (ko_watch_until) {  /* V13.5 PvP death: did the game take it from here? */
         extern int laonline_death_active(void);
@@ -1099,145 +1318,51 @@ static void pvp_tick(struct Cpu *c, uint64_t frame, const char *level, const flo
         else if (hp_now > 0) { LOG("[laonline] V13.5 PvP death: back up with %d/4 hearts (fairy or continue)\n", hp_now); ko_watch_until = 0; }
         else if (now >= ko_watch_until && hp_now == 0) {
             int full = 12 + 4 * (__builtin_popcount(LD16(SAVE + 0x5558) & 0x1FF) + __builtin_popcountll(LD64(SAVE + 0x5550) & 0xFFFFFFFFull) / 4);
-            pvp_set_hp(full);
-            ko_watch_until = 0; invulnerable_until = now + 2500;
+            uint64_t ps = pvp_status(); if (ps) ST16(ps + 0x84, (uint16_t)full);  /* (the safety net: never left at 0) */
+            ko_watch_until = 0; g_pvp[0].invulnerable_until = now + 2500;
             laonline_notify("PvP: you were knocked out! (the game's death didn't start - please send laonline.log)");
             LOG("[laonline] V13.5 PvP death: NO Game Over 6 s after hearts hit 0 - put back at %d/4 hearts\n", full);
         }
     }
     uint16_t my_map = lao_name_id(level);
     fx_my_map = my_map;
-    if (have_me) {  /* facing = direction Link last moved */
-        if (have_last) { float dx = me[0] - last_me[0], dz = me[2] - last_me[2], d = sqrtf(dx * dx + dz * dz);
-            if (d > .03f && d < 3.f) { face_x = dx / d; face_z = dz / d; } }
-        memcpy(last_me, me, sizeof last_me); have_last = 1;
+    for (int s = 0; s < PVP_SELVES; s++) {  /* facing = direction each one last moved */
+        PvpSelf *p = &g_pvp[s];
+        if (!here[s]) { p->have_last = 0; continue; }
+        if (p->have_last) { float dx = pos[s][0] - p->last_me[0], dz = pos[s][2] - p->last_me[2], d = sqrtf(dx * dx + dz * dz);
+            if (d > .03f && d < 3.f) { p->face_x = dx / d; p->face_z = dz / d; } }
+        memcpy(p->last_me, pos[s], sizeof p->last_me); p->have_last = 1;
     }
     {   /* V14: hit markers follow the player who was hit; lock-on (L3 / F8) */
-        float tmp[3]; uint16_t tm; int my_id = -1;
-        for (int id = 0; id < LAO_PLAYERS && my_id < 0; id++) { int l = -1; if (laonline_v12_peer(id, tmp, &tm, &l)) my_id = l; }
         pthread_mutex_lock(&mx);
         for (int i = 0; i < HM_N; i++) {
             if (!hm[i].at || now - hm[i].at > 900) continue;
-            hm[i].mine = hm[i].attacker == my_id; hm[i].on_me = hm[i].victim == my_id;
-            float p[3]; uint16_t map; int local;
-            if (hm[i].on_me && have_me) { memcpy(hm[i].pos, me, 12); hm[i].resolved = 1; }
-            else if (laonline_v12_peer(hm[i].victim, p, &map, &local) && map == my_map) { memcpy(hm[i].pos, p, 12); hm[i].resolved = 1; }
+            int vs = pvp_self_of_id(hm[i].victim);
+            hm[i].mine = pvp_self_of_id(hm[i].attacker) >= 0; hm[i].on_me = vs >= 0;
+            float o[3]; uint16_t map; int local;
+            if (vs >= 0 && here[vs]) { memcpy(hm[i].pos, pos[vs], 12); hm[i].resolved = 1; }
+            else if (laonline_v12_peer(hm[i].victim, o, &map, &local) && map == my_map) { memcpy(hm[i].pos, o, 12); hm[i].resolved = 1; }
         }
         pthread_mutex_unlock(&mx);
         /* V15: L3 / F8 toggle the Z-target too (ZL is the main button: runtime/hle/ztarget.c). Locked on anything
-         * (player or enemy): every PvP attack aims at it. */
+         * (player or enemy): every PvP attack aims at it. (Player 1's.) */
         if (atomic_exchange(&key_lock, 0)) { extern void ztarget_toggle(void); ztarget_toggle(); }
-        { extern int ztarget_get(float pos[3], int *player); float tp[3];
-          if (ztarget_get(tp, NULL) && have_me) { float dx = tp[0] - me[0], dz = tp[2] - me[2], d = sqrtf(dx * dx + dz * dz);
-              if (d > .05f) { face_x = dx / d; face_z = dz / d; } } }
+        { extern int ztarget_get_of(int, float pos[3], int *player); float tp[3];  /* (each player's own lock) */
+          for (int s = 0; s < PVP_SELVES; s++)
+              if (here[s] && ztarget_get_of(s, tp, NULL)) { float dx = tp[0] - pos[s][0], dz = tp[2] - pos[s][2], d = sqrtf(dx * dx + dz * dz);
+                  if (d > .05f) { g_pvp[s].face_x = dx / d; g_pvp[s].face_z = dz / d; } } }
     }
-    /* V13.5 + V14: every PvP attack. Each one: (1) everyone else is sent what to DRAW (kind 2 visual frame) and
-     * (2) after its delay we check who it reaches and send the hit (kind 1, with damage) for the server to pass on. */
-    int presses[4]; int pn; pthread_mutex_lock(&mx); pn = item_press_n; memcpy(presses, item_press_slot, sizeof presses); item_press_n = 0; pthread_mutex_unlock(&mx);
-    int pvp_on = atomic_load(&pvp_local);
-    if (pvp_on && pvp_self_down()) {  /* V15.1: knocked out - nothing you press reaches anyone, queued attacks are dropped */
-        pn = 0; shot_n = 0; swing_until = 0;
-        pthread_mutex_lock(&mx); spin_req = 0; pthread_mutex_unlock(&mx);
-        return;
-    }
-    uint64_t ps = pvp_on && g_ga && GA(PLAYER_STATUS_PTR) ? LD64(GA(PLAYER_STATUS_PTR)) : 0;
+    uint64_t ps = g_ga && GA(PLAYER_STATUS_PTR) ? LD64(GA(PLAYER_STATUS_PTR)) : 0;
     int valid = ps && ((ps >= MAIN_BASE && ps + 0x100 < SDK_BASE) || (ps >= HEAP_BASE && ps + 0x100 < HEAP_BASE + HEAP_MAX));
     int sword_lv = save_ready() && (LD32(SAVE + ITEMS) & 1) ? 1 + (LD8(SAVE + UPGRADES) & 1) : 1;  /* Noble Sword = L2 */
-    #define PVP_SHOW(item_) do { if (relay_pvp135) { \
-        uint8_t f_[21] = {19, 0, LAO_C_PVP, 2, (uint8_t)(item_)}; memcpy(f_ + 5, &my_map, 2); memcpy(f_ + 7, me, 12); \
-        f_[19] = (uint8_t)(int8_t)lrintf(face_x * 100.f); f_[20] = (uint8_t)(int8_t)lrintf(face_z * 100.f); \
-        pthread_mutex_lock(&mx); push_frame(f_, 21); pthread_mutex_unlock(&mx); } } while (0)
-    #define PVP_QUEUE(a_, q_) do { if (shot_n < 8) shots[shot_n++] = (PvpShot){(a_), now + (uint64_t)(a_)->delay_ms, now, me[0], me[1], me[2], face_x, face_z, ++shot_seq, (q_)}; } while (0)
-    if (pvp_on && have_me && valid) {
-        for (int i = 0; i < pn; i++) {
-            int item = LD8(ps + presses[i]);
-            const PvpAttack *a = NULL;
-            for (unsigned k = 0; k < sizeof k_pvp_items / sizeof *k_pvp_items; k++) if (k_pvp_items[k].item == item) a = &k_pvp_items[k];
-            if (!a) {
-                if (item == 9 && pvp_cooldown_ok(PVP_STOMP, now)) { PVP_QUEUE(pvp_move(PVP_STOMP), 2); PVP_SHOW(PVP_STOMP); }  /* Roc's Feather: land on them */
-                continue;
-            }
-            /* Bow + Bombs pressed together (within 0.25 s, either order) = a bomb arrow */
-            int combo = -1;
-            for (int s2 = 0; s2 < shot_n; s2++)
-                if (now - shots[s2].made <= 250 && now < shots[s2].at &&
-                    ((item == 3 && shots[s2].a->item == 2) || (item == 2 && shots[s2].a->item == 3))) combo = s2;
-            if (combo >= 0) {
-                shots[combo] = shots[--shot_n];
-                PVP_QUEUE(pvp_move(PVP_BOMB_ARROW), 6); PVP_SHOW(PVP_BOMB_ARROW);
-                continue;
-            }
-            if (!pvp_cooldown_ok(item, now)) continue;  /* V15.1: still out / reloading - no new hit */
-            PVP_QUEUE(a, a->quarters); PVP_SHOW(item);
+    for (int s = 0; s < PVP_SELVES; s++) {
+        int my_id = self_ids[s];
+        if (!atomic_load(&pvp_on_of[s]) || !here[s] || !valid || (s && (my_id < 0 || !pvp_ok))) {
+            pthread_mutex_lock(&mx); g_pvp[s].item_press_n = 0; g_pvp[s].spin_req = 0; pthread_mutex_unlock(&mx);
+            g_pvp[s].shot_n = 0;
+            continue;
         }
-        /* sword: a slash everyone sees (the hit itself is the swing check below) */
-        static unsigned shown_swing;
-        if (now <= swing_until && shown_swing != swing_id) { shown_swing = swing_id; PVP_SHOW(PVP_SWORD); }
-        /* spin attack: B charged and let go */
-        int spin; pthread_mutex_lock(&mx); spin = spin_req; spin_req = 0; pthread_mutex_unlock(&mx);
-        if (spin) { PVP_QUEUE(pvp_move(PVP_SPIN), 4 * sword_lv); PVP_SHOW(PVP_SPIN); }
-        /* Pegasus Boots dash: the boots button held 0.35 s+ while Link is running fast -> rams whoever is in front */
-        uint64_t xd, yd; pthread_mutex_lock(&mx); xd = x_down_at; yd = y_down_at; pthread_mutex_unlock(&mx);
-        int boots_held = (xd && now - xd >= 350 && LD8(ps + 0xa3) == 11) || (yd && now - yd >= 350 && LD8(ps + 0xa2) == 11);
-        static float dash_last[3]; static uint64_t dash_t, dash_shown; static unsigned dash_hit[LAO_PLAYERS], dash_seq; static int dashing;
-        float speed = 0;
-        if (dash_t && now > dash_t) { float dx = me[0] - dash_last[0], dz = me[2] - dash_last[2]; speed = sqrtf(dx * dx + dz * dz) * 1000.f / (float)(now - dash_t); }
-        memcpy(dash_last, me, 12); dash_t = now;
-        int dash_now = boots_held && speed > 4.f && speed < 60.f;
-        if (dash_now && !dashing) dash_seq++;
-        dashing = dash_now;
-        if (dashing) {
-            if (now - dash_shown > 300) { dash_shown = now; PVP_SHOW(PVP_DASH); }
-            for (int id = 0; id < LAO_PLAYERS && relay_pvp135; id++) {
-                float p[3]; uint16_t map; int local;
-                if (!atomic_load(&pvp_peer[id]) || dash_hit[id] == dash_seq || !laonline_v12_peer(id, p, &map, &local) || id == local || map != my_map) continue;
-                float dx = p[0] - me[0], dz = p[2] - me[2], d = sqrtf(dx * dx + dz * dz);
-                if (d > 1.7f || fabsf(p[1] - me[1]) > 1.5f || (d > .3f && (dx * face_x + dz * face_z) / d < .3f)) continue;
-                dash_hit[id] = dash_seq;
-                uint8_t f[7] = {5, 0, LAO_C_PVP, 1, (uint8_t)id, (uint8_t)(LD32(SAVE + ITEMS) & 1 ? 4 * sword_lv : 2), PVP_DASH};
-                pthread_mutex_lock(&mx); if (!relay_pvpcoop) f[0] = 4; push_frame(f, relay_pvpcoop ? 7 : 6); if (!relay_pvpko) hitmark_add(local, id, f[5]); pthread_mutex_unlock(&mx);
-                LOG("[laonline] V14 PvP Boots dash reached player #%d\n", id);
-            }
-        }
-    }
-    #undef PVP_SHOW
-    #undef PVP_QUEUE
-    for (int s = 0; s < shot_n;) {
-        if (now < shots[s].at) { s++; continue; }
-        PvpShot sh = shots[s]; shots[s] = shots[--shot_n];
-        if (!atomic_load(&pvp_local) || !relay_pvp135) continue;  /* older server: sword only */
-        float cx = sh.x + sh.fx * sh.a->ahead, cz = sh.z + sh.fz * sh.a->ahead;  /* (a bomb: where it was put down) */
-        for (int id = 0; id < LAO_PLAYERS; id++) {
-            if (!atomic_load(&pvp_peer[id])) continue;
-            float p[3]; uint16_t map; int local;
-            if (!laonline_v12_peer(id, p, &map, &local) || id == local || map != my_map) continue;
-            float dx = p[0] - cx, dy = p[1] - sh.y, dz = p[2] - cz, d = sqrtf(dx * dx + dz * dz);
-            if (d > sh.a->range || fabsf(dy) > 2.f) continue;
-            if (sh.a->cone > -1.5f && d > .5f && (dx * sh.fx + dz * sh.fz) / d < sh.a->cone) continue;  /* not in front */
-            int q = sh.quarters < 1 ? 1 : sh.quarters > 8 ? 8 : sh.quarters;
-            uint8_t f[7] = {5, 0, LAO_C_PVP, 1, (uint8_t)id, (uint8_t)q, (uint8_t)sh.a->item};  /* V15: + the weapon (kill feed) */
-            pthread_mutex_lock(&mx); if (!relay_pvpcoop) f[0] = 4; push_frame(f, relay_pvpcoop ? 7 : 6); pthread_mutex_unlock(&mx);
-            LOG("[laonline] V13.5 PvP %s reached player #%d\n", sh.a->name, id);
-            pthread_mutex_lock(&mx); if (!relay_pvpko) hitmark_add(local, id, q); pthread_mutex_unlock(&mx);
-        }
-    }
-    if (!atomic_load(&pvp_local) || !have_me || now > swing_until) return;
-    for (int id = 0; id < LAO_PLAYERS; id++) {
-        if (!atomic_load(&pvp_peer[id]) || hit_swing[id] == swing_id) continue;
-        float p[3]; uint16_t map; int local;
-        if (!laonline_v12_peer(id, p, &map, &local) || id == local || map != my_map) continue;
-        float dx = p[0] - me[0], dy = p[1] - me[1], dz = p[2] - me[2];
-        if (dx * dx + dz * dz > 1.9f * 1.9f || fabsf(dy) > 1.5f) continue;
-        hit_swing[id] = swing_id;
-        if (relay_pvp135) {  /* V14: sword damage by level (Noble Sword = 1 heart) */
-            uint8_t f[7] = {5, 0, LAO_C_PVP, 1, (uint8_t)id, (uint8_t)(2 * sword_lv), PVP_SWORD};
-            pthread_mutex_lock(&mx); if (!relay_pvpcoop) f[0] = 4; push_frame(f, relay_pvpcoop ? 7 : 6); pthread_mutex_unlock(&mx);
-        } else {
-            uint8_t f[5] = {3, 0, LAO_C_PVP, 1, (uint8_t)id};
-            pthread_mutex_lock(&mx); push_frame(f, 5); pthread_mutex_unlock(&mx);
-        }
-        LOG("[laonline] V12 PvP swing reached player #%d\n", id);
-        pthread_mutex_lock(&mx); if (!relay_pvpko) hitmark_add(local, id, 2 * sword_lv); pthread_mutex_unlock(&mx);
+        pvp_attacks(s, pos[s], my_map, my_id, sword_lv, ps, now);
     }
 }
 
@@ -1252,7 +1377,7 @@ static void dive_tick(const char *level, const char *room) {
         hinted = 1;
         laonline_notify("Catfish's Maw: if diving in doesn't work, hold R3 (or F7) for 2 seconds.");
     }
-    int held = (prev_buttons >> 5 & 1) || atomic_load(&key_f7_down);
+    int held = (g_pvp[0].prev_buttons >> 5 & 1) || atomic_load(&key_f7_down);
     if (!bay || !flippers || !held) { assist_since = 0; return; }
     uint64_t now = ms_now();
     if (!assist_since) assist_since = now;
@@ -1270,7 +1395,7 @@ void laonline_v12_tick(struct Cpu *c, uint64_t frame, const char *level, const c
     snprintf(cur_level, sizeof cur_level, "%s", level); snprintf(cur_room, sizeof cur_room, "%s", room ? room : "");  /* V15.1 */
     progress_tick(c, frame);
     pvp_tick(c, frame, level, me, have_me);
-    knock_tick(frame);
+    for (int s = 0; s < PVP_SELVES; s++) knock_tick(s, frame);
     dive_tick(level, room);
 }
 
@@ -1282,9 +1407,10 @@ const char *laonline_v12_global_lobby(void) { return atomic_load(&global_rando) 
 RT_ON_RESET(laonline_v12_reset) {
     memset(bracelet_local, 0, sizeof bracelet_local);
     pthread_mutex_lock(&mx);
-    out_head = out_count = 0; hit_n = 0;
+    out_head = out_count = 0; memset(hit_n, 0, sizeof hit_n);
     memset(flag_in, 0, sizeof flag_in); memset(item_in, 0, sizeof item_in);
     pthread_mutex_unlock(&mx);
-    rupee_check.expected = 0; last_scan = 0; prev_buttons = 0; r3_since = assist_since = swing_until = 0;
-    atomic_store(&pvp_local, 0); atomic_store(&pvp_sent_state, -1); ko_watch_until = 0; memset(hm, 0, sizeof hm);
+    rupee_check.expected = 0; last_scan = 0; assist_since = 0;
+    pvp_selves_reset(); for (int s = 0; s < PVP_SELVES; s++) atomic_store(&pvp_on_of[s], 0);
+    atomic_store(&pvp_sent_state, -1); ko_watch_until = 0; memset(hm, 0, sizeof hm);
 }

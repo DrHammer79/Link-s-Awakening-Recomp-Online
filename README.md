@@ -99,7 +99,8 @@ chat, PvP and Z-targeting. Thank you for it. Here it runs on game 1.0.0 and 1.0.
   the host starts it. While a randomizer seed is played, the session is a Co-op Randomizer one on that seed (the others
   play the same seed). Leaving the session on the page ends online play.
 - **Several players on one PC:** each local co-op player goes online as a player of their own ("Name P2", ...), with
-  their own Link, hearts and colour. Progress, items and the save stay one per PC.
+  their own Link, hearts and colour, their own PvP (each turns it on with their own R3) and their own Z-target (their
+  ZL). Progress, items and the save stay one per PC.
 - What came over from LA-Online V15.2 and what changed: [docs/laonline-port.md](docs/laonline-port.md); the relay
   protocol the game speaks: [docs/laonline-protocol.md](docs/laonline-protocol.md).
 

@@ -217,12 +217,19 @@ def handle(p, b):
         kind = b[1]
         if kind == 0:
             to_others(p, bytes([0xA2, 0]) + pid + b[2:3], 0xA2)
+            log(f'pvp {"on" if len(b) > 2 and b[2] else "off"} {p.id}')
         elif kind == 1 and len(b) >= 3:
             target, quarters = b[2], b[3] if len(b) > 3 else 1
             q = L.players.get(target)
             if q:
                 q.send(bytes([0xA2, 1]) + pid + bytes([quarters]))
+                for r in L.players.values():  # (the hit confirmed to everyone: their hit markers - V14's kind 4)
+                    r.send(bytes([0xA2, 4]) + pid + bytes([target, quarters]))
                 log(f'pvp hit {p.id} -> {target} ({quarters} quarters)')
+        elif kind == 2 and len(b) == 19:  # an attack to draw: (attacker,) item, map, position, facing
+            to_others(p, bytes([0xA2, 2]) + pid + b[2:19])
+        elif kind == 3 and len(b) >= 3:  # knocked out by player b[2] (the real relay's kill feed: not here)
+            log(f'pvp knockout {p.id} by {b[2]}')
     else:
         log(f'ignored type {t:#x} from {p.id}')
 

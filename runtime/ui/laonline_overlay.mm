@@ -765,17 +765,23 @@ extern "C" void laonline_overlay_draw(ImVec2 display, ImFont *font, float scale)
 
 /* V15 Z-targeting reticle (runtime/hle/ztarget.c), drawn in every mode (offline too): three arrows circling the
  * target and pointing in, like Z-targeting in other Zelda games. */
-extern "C" int ztarget_get(float pos[3], int *player);
+extern "C" int ztarget_get_of(int self,float pos[3],int *player);
+extern "C" uint32_t coop_colour_rgb(int player);
+/* (LAS Recomp Co-Op's port) each of this PC's players' own Z-target: Player 1's in its gold, players 2..8's in their
+ * co-op colour */
 extern "C" void ztarget_overlay_draw(ImVec2 display,float scale){
-    float lp[3];if(!ztarget_get(lp,NULL))return;
+  for(int s=0;s<8;s++){
+    float lp[3];if(!ztarget_get_of(s,lp,NULL))continue;
     float vw=display.x,vh=display.y;
     if(widescreen_frame_boxed(renderer_exec_frame())&&!g_room_wide){vw=fminf(display.x,display.y*16.f/9.f);vh=vw*9.f/16.f;}
-    float nx,ny;if(!widescreen_world_to_ndc(lp[0],lp[1]+.9f,lp[2],&nx,&ny)||nx<-1.2f||nx>1.2f||ny<-1.2f||ny>1.2f)return;
+    float nx,ny;if(!widescreen_world_to_ndc(lp[0],lp[1]+.9f,lp[2],&nx,&ny)||nx<-1.2f||nx>1.2f||ny<-1.2f||ny>1.2f)continue;
     ImVec2 c((display.x-vw)*.5f+(nx*.5f+.5f)*vw,(display.y-vh)*.5f+(.5f-ny*.5f)*vh);
     ImDrawList *dl=ImGui::GetForegroundDrawList();
-    float t=(float)ImGui::GetTime(),r=(26+4*sinf(t*6))*scale,sz=9*scale;
+    uint32_t rgb=s?coop_colour_rgb(s):0xffc828;ImU32 fill=IM_COL32((rgb>>16)&255,(rgb>>8)&255,rgb&255,235);
+    float t=(float)ImGui::GetTime()+s*.7f,r=(26+4*sinf(t*6)+4*s)*scale,sz=9*scale;
     for(int k=0;k<3;k++){float a=t*2.2f+k*2.0944f,ca=cosf(a),sa=sinf(a);ImVec2 tip(c.x+ca*r,c.y+sa*r),base(c.x+ca*(r+sz*1.8f),c.y+sa*(r+sz*1.8f));
         ImVec2 l(base.x-sa*sz,base.y+ca*sz),rr(base.x+sa*sz,base.y-ca*sz);
-        dl->AddTriangleFilled(tip,l,rr,IM_COL32(255,200,40,235));dl->AddTriangle(tip,l,rr,IM_COL32(120,40,0,255),1.5f*scale);}
+        dl->AddTriangleFilled(tip,l,rr,fill);dl->AddTriangle(tip,l,rr,IM_COL32(120,40,0,255),1.5f*scale);}
     dl->AddCircle(c,r*.45f,IM_COL32(255,80,40,150),24,2*scale);
+  }
 }

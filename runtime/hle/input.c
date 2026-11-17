@@ -1332,8 +1332,20 @@ static void coop_fill(uint8_t *s, int i) {
     if (minus_held[i])  // (his Minus down: L and R step his colour - coop_drop_press - not the game's)
         own &= ~(pad_bits(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER) | pad_bits(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER));
     uint64_t b = ((menu ? 0 : held | tap[i]) | (off ? 0 : coop_script_btn[i])) & own;
+    extern bool laonline_configured(void);
+    if (laonline_configured()) {  // online play: his B / X / Y / R3 seen for his own PvP (runtime/hle/laonline_v12.c)
+        extern uint64_t laonline_v12_input_of(int, uint64_t, int), ztarget_input_of(int, uint64_t, int);
+        b = laonline_v12_input_of(i + 1, b, menu);
+        b = ztarget_input_of(i + 1, b, menu);  // (his ZL: his own Z-target, runtime/hle/ztarget.c)
+    }
     int32_t lx = clamp_axis((menu ? 0 : coop_axis[i][0]) + (off ? 0 : coop_script_axis[i][0]));
     int32_t ly = clamp_axis((menu ? 0 : coop_axis[i][1]) + (off ? 0 : coop_script_axis[i][1]));
+    if (!menu && laonline_configured()) {  // (a PvP hit staggers him: his stick held still; Z-targeting circles his
+        extern int laonline_v12_stagger_of(int);  // target - as Player 1's)
+        extern void ztarget_stick_of(int, int32_t *, int32_t *);
+        if (laonline_v12_stagger_of(i + 1)) lx = ly = 0;
+        ztarget_stick_of(i + 1, &lx, &ly);
+    }
     int32_t rx = clamp_axis((menu ? 0 : coop_axis[i][2]) + (off ? 0 : coop_script_axis[i][2]));
     int32_t ry = clamp_axis((menu ? 0 : coop_axis[i][3]) + (off ? 0 : coop_script_axis[i][3]));
     extern bool mirror_input(void);
