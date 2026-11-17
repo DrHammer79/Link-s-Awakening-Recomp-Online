@@ -36,6 +36,7 @@ int rt_coop_hook(Cpu *c, int which);  // coop.c (which: the COOP_* site, below)
     X(MB_SEEN_SITE) \
     X(SHADOW_LINK_APPEAR_SITE) \
     X(SHADOW_LINK_BGM_SITE) \
+    X(LAONLINE_GAMEOVER_SITE) \
     X(BUFF_MUSIC_PICKUP_SITE) \
     X(BUFF_MUSIC_FLAGS_SITES_0) \
     X(BUFF_MUSIC_FLAGS_SITES_1) \
@@ -163,6 +164,11 @@ int rt_hook(Cpu *c, uint64_t site) {
         return rt_shadow_link_appear(c->x[0]) ? 2 : 0;
     case H_SHADOW_LINK_BGM_SITE:  // SHADOW_LINK_BGM_SITE - bl main+0xce8ce0: his chamber music, only in the chamber
         return rt_shadow_link_bgm();
+    case H_LAONLINE_GAMEOVER_SITE: {  // LAONLINE_GAMEOVER_SITE - ldr x20, [sp, #0x18]: the Game Over event submitted
+        extern void laonline_death_native(Cpu *c);  // (online play tells the others: laonline_death.c)
+        laonline_death_native(c);
+        return 0;
+    }
     case H_BUFF_MUSIC_PICKUP_SITE:
         return !g_settings.powerup_music;
     case H_BUFF_MUSIC_FLAGS_SITES_0:

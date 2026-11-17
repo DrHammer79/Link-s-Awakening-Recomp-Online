@@ -231,7 +231,26 @@ static std::atomic<int> g_kbd{0};  // 1 open, 2 confirmed, 3 cancelled
 static std::atomic<bool> g_last_pad{false};
 static char g_kbd_text[96];
 static int g_kbd_max = 8;
-static bool capturing() { return g_open.load() || g_kbd.load() == 1; }
+// Online play's chat box (drawn by runtime/ui/laonline_overlay.mm): T opens it in play, Enter sends, Esc / F1 close it.
+// While it is open the keys are its text and the game gets no input; each opening is a new generation (the overlay
+// starts an empty line).
+extern "C" {
+#include "../hle/laonline_chat.h"
+bool laonline_ui_paused(void);
+bool laonline_overlay_wanted(void);  // (runtime/ui/laonline_overlay.mm: the others' names and hearts, chat, the minimap)
+void laonline_overlay_draw(ImVec2 display, ImFont *font, float scale);
+void ztarget_overlay_draw(ImVec2 display, float scale);  // (the Z-target reticle, in play online or not)
+int ztarget_get(float pos[3], int *player);              // (runtime/hle/ztarget.c: a target locked, and where)
+}
+static std::atomic<bool> g_chat_open(false), g_chat_focus_reset(false);
+static std::atomic<uint64_t> g_chat_generation(0);
+extern "C" uint64_t laonline_chat_input_generation(void) { return g_chat_generation.load(); }
+extern "C" bool laonline_chat_input_open(void) { return g_chat_open.load(); }
+extern "C" void laonline_chat_input_close(void) {
+    if (g_chat_open.exchange(false)) input_reset(), g_chat_focus_reset = true;
+    laonline_chat_typing(0);
+}
+static bool capturing() { return g_open.load() || g_kbd.load() == 1 || g_chat_open.load(); }
 
 // Each controller's sticks and triggers are kept apart (SDL_EVENT_GAMEPAD_AXIS_MOTION), and the menu gets, for each
 // direction, the furthest any controller pushes it. Every controller's axis events set the same keys: with several
@@ -288,6 +307,29 @@ bool menu_handle_event(const SDL_Event *e) {
         if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) ui_typing_pad(true);
         if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 12000) g_last_pad = true, ui_typing_pad(true);
     }
+    // online chat (see g_chat_open): T opens it; it closes with Esc / F1, losing focus, or chat going away
+    if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat && e->key.scancode == SDL_SCANCODE_T && !capturing() &&
+        g_settings.laonline_chat && game_in_play() && laonline_chat_available() && !laonline_ui_paused()) {
+        input_reset();
+        g_chat_focus_reset = true, g_last_pad = false;
+        g_chat_generation.fetch_add(1);
+        g_chat_open = true;
+        laonline_chat_typing(g_settings.laonline_typing);
+        return true;
+    }
+    if (g_chat_open.load()) {
+        if (!g_settings.laonline_chat || !laonline_chat_available() || laonline_ui_paused()) laonline_chat_input_close();
+        else if (e->type == SDL_EVENT_KEY_DOWN &&
+                 (e->key.scancode == SDL_SCANCODE_ESCAPE || e->key.scancode == SDL_SCANCODE_F1)) {
+            laonline_chat_input_close();
+            return true;
+        } else if (e->type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+            laonline_chat_input_close();
+            return false;
+        } else if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e->type == SDL_EVENT_GAMEPAD_BUTTON_UP ||
+                   e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION)
+            return true;  // (a controller does nothing while typing)
+    }
     if (g_kbd.load() == 1 && e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) {  // Enter confirms, Esc cancels
         if (e->key.scancode == SDL_SCANCODE_RETURN || e->key.scancode == SDL_SCANCODE_KP_ENTER) { g_kbd = 2; return true; }
         if (e->key.scancode == SDL_SCANCODE_ESCAPE) { g_kbd = 3; return true; }
@@ -298,7 +340,7 @@ bool menu_handle_event(const SDL_Event *e) {
         return true;
     }
     // typing (a text field, the on-screen keyboard, the name entry): keys are text, not menu shortcuts
-    bool typing = g_kbd.load() == 1 || (g_open.load() && g_text_busy.load());
+    bool typing = g_chat_open.load() || g_kbd.load() == 1 || (g_open.load() && g_text_busy.load());
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
         if (!e->key.repeat && (e->key.scancode == SDL_SCANCODE_F1 ||
@@ -2115,8 +2157,9 @@ static void perf_overlay(float scale) {
 // Whether menu_render draws anything: the menu, the keyboard, an overlay (FPS, inventory, tracker, chaos, race, a
 // pickup card, the d-pad cross, the touch controls, the co-op hearts).
 static bool render_needed(bool open, bool kbd, bool inv, bool trk, bool trkd, bool chaos, bool race, bool flyin, bool dpad,
-                          bool touch, bool coop) {
-    return open || kbd || g_settings.show_fps || inv || trk || trkd || chaos || race || flyin || dpad || touch || coop;
+                          bool touch, bool coop, bool online) {
+    return open || kbd || g_settings.show_fps || inv || trk || trkd || chaos || race || flyin || dpad || touch || coop ||
+           online;
 }
 
 #ifdef __APPLE__
@@ -2137,6 +2180,9 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool flyin = pickup_flyin_wanted() && !open;  // (a silent pickup's card)
     bool dpad = !open && dpad_overlay_wanted();
     bool coop = !open && coop_hud_wanted();       // (local co-op: the other players' hearts)
+    bool lao = laonline_overlay_wanted();  // (online play: the others' names and hearts, chat, the feed, the minimap)
+    float zt_at[3];
+    bool zt = !open && game_in_play() && ztarget_get(zt_at, NULL);  // (a Z-target locked: its reticle)
 #ifdef __APPLE__
     plastic_perf_note(cb, open);  // (LARECOMP_UI_PERF test only)
 #else
@@ -2147,7 +2193,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     // (the stick / D-pad takes the thumb on the Movement row's preview only: on the others the panel may sit over it)
     touch_preview_play(PLAT_TOUCH && open && preview_active() && g_tab == 10 && g_settings.touch_mode != 2 &&
                        !strcmp(preview_label(), "Movement"));
-    if (!render_needed(open, kbd, inv, trk, trkd, chaos, race, flyin, dpad, touch, coop)) {
+    if (!render_needed(open, kbd, inv, trk, trkd, chaos, race, flyin, dpad, touch, coop, lao || zt)) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         g_ov_same = 0;  // (shown again: built afresh first)
         return;
@@ -2175,8 +2221,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         char rk[64], dk[160] = "";
         // (only the FPS counter, the run timer and the d-pad cross; input only reaches ImGui while the menu or the name
         // entry is up)
-        // (not the advanced overlay: it changes every frame)
-        if (!open && !kbd && !inv && !trk && !trkd && !chaos && !flyin && !touch && !coop &&
+        // (not the advanced overlay, nor online play's or the Z-target's: they change every frame)
+        if (!open && !kbd && !inv && !trk && !trkd && !chaos && !flyin && !touch && !coop && !lao && !zt &&
             !(g_settings.show_fps && g_settings.fps_advanced) && race_overlay_key(rk, sizeof rk)) {
             pthread_mutex_lock(&q_lock);
             bool events = !q_events.empty();
@@ -2208,6 +2254,11 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         }
         if (key[0] && !strcmp(key, g_ov_key)) g_ov_same++;
         else { memcpy(g_ov_key, key, sizeof key); g_ov_same = key[0] ? 1 : 0; }
+    }
+    if (g_chat_focus_reset.exchange(false)) {  // (the chat box opened or closed: nothing held or focused carries over)
+        io.ClearInputKeys();
+        io.ClearInputMouse();
+        ImGui::ClearActiveID();
     }
     drain_events(io);
     // fonts are built at 34/56 px for a ~1080 px tall output; scale to the window (phones: kUi larger)
@@ -2268,6 +2319,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     if (race) race_overlay_draw(io.DisplaySize, g_menu_font_big, scale);
     if (dpad) dpad_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont(), scale);
     if (coop) coop_hud_draw(io.DisplaySize, g_menu_font_big, scale);
+    if (lao) laonline_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont(), scale);
+    if (zt) ztarget_overlay_draw(io.DisplaySize, scale);
     if (flyin) pickup_flyin_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont(), scale);
     if (trk) tracker_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     if (chaos) chaos_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());

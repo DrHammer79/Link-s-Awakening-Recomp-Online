@@ -223,3 +223,10 @@ GA_ADDR(COOP_PART_GONE_SITE_0,            0x70000eb410)
 GA_ADDR(COOP_PART_GONE_SITE_1,            0x7000e3b510)
 GA_ADDR(COOP_CULL_SITE,                   0x7000852ad8)
 GA_ADDR(COOP_JOIN_CAMERA_SITE,            0x700083a5e4)
+
+// Online play (runtime/hle/laonline*.c): another PC's player is a Shadow Link actor - his update's entry (his own
+// decisions skipped), the animation player's entry (the remote player's animations played on him); the Game Over
+// event just submitted (Common.bfevfl GameOver: a death notice for the others). The same in 1.0.0 and 1.0.1.
+GA_ADDR(LAONLINE_SHADOW_UPDATE_SITE,      0x7000d0a970)
+GA_ADDR(LAONLINE_ANIMATION_SITE,          0x7000deca80)
+GA_ADDR(LAONLINE_GAMEOVER_SITE,           0x7000dab000)

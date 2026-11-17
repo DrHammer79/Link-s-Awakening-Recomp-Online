@@ -166,6 +166,7 @@ static void scan_tick(uint64_t frame) {
 
 static void shadow_link_seen(uint64_t o);
 void rt_mb_seen(uint64_t o) {
+    { extern void ztarget_actor_seen(uint64_t); ztarget_actor_seen(o); }  // (Z-targeting's actors around Link: ztarget.c)
     uint64_t vt = LD64(o);
     if (vt == GA(SHADOW_LINK_VTABLE)) shadow_link_seen(o);
     if (ENV("LARECOMP_MB_LOG")) log_new_vtable(o, vt);
@@ -550,7 +551,12 @@ static void shadow_link_seen(uint64_t o) {
         if (g_sl[i].obj == o) g_sl[i].last = renderer_present_count();
 }
 
+// Online play shows another PC's player as a Shadow Link actor dressed as Link (runtime/hle/laonline.c): his appearance
+// plays no event and moves no camera, and while one is out the chamber's music doesn't start.
+int laonline_is_puppet(uint64_t o);
+int laonline_puppet_active(void);
 int rt_shadow_link_appear(uint64_t o) {  // (SHADOW_LINK_APPEAR_SITE: 1 = the request is skipped)
+    if (laonline_is_puppet(o)) return 1;
     extern const char *rando_seed_dir(void);
     uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
     if (!rando_seed_dir() || !ps || !strncmp((const char *)(uintptr_t)ps, "Panel", 5)) return 0;  // (Dampe's chamber: as is)
@@ -568,6 +574,7 @@ int rt_shadow_link_appear(uint64_t o) {  // (SHADOW_LINK_APPEAR_SITE: 1 = the re
 // His music (SHADOW_LINK_BGM_SITE): his code starts BGM_PANEL_SHADOW_LINK through Dampe's chamber manager (the level's
 // music held until his defeat). Only the chamber is his; in seeds, everywhere else the area's own music plays on.
 int rt_shadow_link_bgm(void) {  // (1 = the call is skipped)
+    if (laonline_puppet_active()) return 1;  // (another player's Link: no chamber music)
     extern const char *rando_seed_dir(void);
     uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
     if (!rando_seed_dir() || !ps || !strncmp((const char *)(uintptr_t)ps, "Panel", 5)) return 0;  // (Dampe's chamber: as is)

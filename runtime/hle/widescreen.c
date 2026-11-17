@@ -231,6 +231,20 @@ void widescreen_scene_ubo(const float *u, uint64_t size) {
     g_vp_frame = f;
 }
 
+// A world point through the scene camera above (as drawn: with the co-op zoom), to normalized device coordinates
+// (-1..1). False behind the camera, outside the view or with no scene camera in the last 2 frames. (Online play's
+// name tags and markers, runtime/ui/laonline_overlay.mm.)
+bool widescreen_world_to_ndc(float x, float y, float z, float *nx, float *ny) {
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t f = renderer_exec_frame();
+    if (g_vp_frame == ~0ull || f < g_vp_frame || f - g_vp_frame > 2) return false;
+    float clip[4];
+    for (int r = 0; r < 4; ++r) clip[r] = g_vp[r * 4] * x + g_vp[r * 4 + 1] * y + g_vp[r * 4 + 2] * z + g_vp[r * 4 + 3];
+    if (!(clip[3] > 0.001f)) return false;
+    *nx = clip[0] / clip[3], *ny = clip[1] / clip[3];
+    return isfinite(*nx) && isfinite(*ny) && fabsf(*nx) <= 1.08f && fabsf(*ny) <= 1.08f;
+}
+
 static bool heap_ptr(uint64_t p) { return p >= HEAP_BASE && p + 0x40 <= HEAP_BASE + HEAP_MAX && !(p & 7); }
 
 // The world point seen at ndc (x, y) of the scene camera (g_vp): on the floor (y 0) for top-down rooms, on the plane

@@ -111,6 +111,11 @@ static const char *level_name(void) {
 }
 
 uint64_t rt_actor_create_fn(uint64_t fn, uint32_t type, uint64_t info) {
+    {   // online play: a boss's spawn logged, an actor made noted for PvP (read-only: runtime/hle/laonline*.c)
+        extern void laonline_boss_spawn_diagnostic(uint32_t, uint64_t), laonline_v12_actor_created(uint32_t, uint64_t);
+        if (info) laonline_boss_spawn_diagnostic(type, LD64(info));
+        laonline_v12_actor_created(type, info);
+    }
     extern bool rt_digs_skip_plant(uint32_t type, uint64_t info);  // digsanity: no grass / bush on a dug tile
     if (rt_digs_skip_plant(type, info)) return 0;
     extern bool rt_bush_item_skip(uint32_t type, uint64_t info);  // bushsanity: no item until its bush is cut
@@ -317,6 +322,12 @@ const char *souls_at(int i, int *kind, bool *owned) {
     *kind = g_souls[i].kind;
     *owned = flags_ext_get(g_souls[i].flag);
     return g_souls[i].name;
+}
+
+// The event flag of soul i (-1 past the end): online co-op shares it with the room like a story flag (laonline_v12.c).
+int souls_flag_at(int i) {
+    if (g_nsouls < 0) load();
+    return i >= 0 && i < g_nsouls ? g_souls[i].flag : -1;
 }
 
 RT_ON_RESET(souls_reset) {  // (seed switch: reload rando/<seed>/souls.tsv)

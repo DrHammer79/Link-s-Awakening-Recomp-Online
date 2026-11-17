@@ -69,6 +69,10 @@ struct MapSnap {  // what the layer reads of the page, copied each update on the
     uint64_t frame = 0;
     bool closing = false;
     float mtx = 0, mty = 0, msc = 1;  // N_MapCore_00: zoom / scroll
+    // online play's markers (laonline_map_transform): the map rectangle B_Map_00 (left, top, width) and N_MapCore_00's
+    // global transform (3 x 4), which the game's own conversion of a world position to the map uses
+    bool lao_map_ok = false;
+    float lao_plane[3] = {}, lao_matrix[12] = {};
     bool lab_ok[21] = {}, lab_shown[21] = {};
     float lab_x[21] = {}, lab_y[21] = {};
     uint8_t lab_align[21] = {};
@@ -973,6 +977,20 @@ static void map_snapshot(uint64_t obj) {
         const float *t = (const float *)(uintptr_t)(pane + 0x30);
         float sc = *(const float *)(uintptr_t)(pane + 0x48);
         if (sc > 0.1f && sc < 20) s.mtx = t[0], s.mty = t[1], s.msc = sc;
+        // the map rectangle (page + 0x670, B_Map_00: +0x30 / +0x34 its corner, +0x50 its width) and the content
+        // pane's global transform (+0x70): what the game's own world-to-map conversion (main+0xe910a8) uses - with
+        // them online play's markers sit where the game would put Link's (checked against L_MapPlayer_00 on 1.0.0)
+        uint64_t plane = LD64(obj + 0x670);
+        if (plane >= HEAP_BASE && plane + 0xe0 < HEAP_BASE + HEAP_MAX &&
+            !strcmp((const char *)(uintptr_t)(plane + 0xB0), "B_Map_00") &&
+            !strcmp((const char *)(uintptr_t)(pane + 0xB0), "N_MapCore_00")) {
+            s.lao_plane[0] = *(const float *)(uintptr_t)(plane + 0x30);
+            s.lao_plane[1] = *(const float *)(uintptr_t)(plane + 0x34);
+            s.lao_plane[2] = *(const float *)(uintptr_t)(plane + 0x50);
+            memcpy(s.lao_matrix, (const void *)(uintptr_t)(pane + 0x70), sizeof s.lao_matrix);
+            s.lao_map_ok = s.lao_plane[2] > 0 && s.lao_plane[2] < 10000;
+            for (float v : s.lao_matrix) s.lao_map_ok &= isfinite(v) && fabsf(v) < 100000;
+        }
     }
     // each place name's position (default view, 1280x720 UI units) and whether the game shows it
     for (int id = 0; id < 21 && g_panes_for == obj; id++) {
@@ -995,6 +1013,29 @@ static bool map_page_shown(void) {
     return f && !g_map_closing && renderer_present_count() - f <= 2;
 }
 extern "C" bool tracker_map_page_shown(void) { return map_page_shown(); }  // (the touch controls: mobile/touch_controls.mm; local co-op: its hearts step aside)
+
+// Online play's markers on the map page (runtime/ui/laonline_overlay.mm), from the snapshot: with or without the
+// randomizer tracker. The page shown; its zoom / scroll; its map rectangle and transform (map_snapshot).
+static bool map_snap_fresh(MapSnap *s) {
+    if (!map_page_shown()) return false;
+    { std::lock_guard<std::mutex> lk(g_snap_mx); *s = g_snap; }
+    uint64_t now = renderer_present_count();
+    return s->frame && !s->closing && now >= s->frame && now - s->frame <= 2;
+}
+extern "C" bool laonline_map_shown(void) { return map_page_shown(); }
+extern "C" bool laonline_map_view(float *tx, float *ty, float *zoom) {
+    MapSnap s;
+    if (!map_snap_fresh(&s) || !(s.msc > 0.1f && s.msc < 20.0f)) return false;
+    *tx = s.mtx, *ty = s.mty, *zoom = s.msc;
+    return true;
+}
+extern "C" bool laonline_map_transform(float plane[3], float matrix[12]) {
+    MapSnap s;
+    if (!map_snap_fresh(&s) || !s.lao_map_ok) return false;
+    memcpy(plane, s.lao_plane, sizeof s.lao_plane);
+    memcpy(matrix, s.lao_matrix, sizeof s.lao_matrix);
+    return true;
+}
 
 extern "C" bool tracker_overlay_wanted(void) {
     if (!rando_seed_dir() || !g_settings.tracker || !map_page_shown()) return false;

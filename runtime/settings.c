@@ -87,6 +87,15 @@ Settings g_settings = {
     .coop_camera_fit = true,
     .coop_leash = true,
     .coop_colour = {0, 1, 2, 3, 4, 5, 6, 7},
+    .laonline_username = true,
+    .laonline_chat = true, .laonline_bubbles = true, .laonline_typing = true, .laonline_chat_seconds = 6,
+    .laonline_markers = true, .laonline_hearts = true, .laonline_indicators = true,
+    .laonline_feed = true, .laonline_feed_seconds = 10, .laonline_minimap = true, .laonline_dungeon_minimap = true,
+    .laonline_death_notices = true,
+    .laonline_tracker_x = 2, .laonline_tracker_y = 65, .laonline_tracker_opacity = 80, .laonline_tracker_size = 1,
+    .laonline_shared_items = true, .laonline_pickup_notifications = true, .laonline_collection_counters = true,
+    .laonline_sync_story = true, .laonline_sync_supplies = true, .laonline_sync_keys = true,
+    .laonline_sync_upgrades = true, .laonline_sync_souls = true, .laonline_sync_world = true,
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
     .upscaler_auto = true,
     .shadow_quality = SHADOW_DEFAULT,
@@ -217,6 +226,51 @@ void settings_resolve_defaults(bool integrated) {
         g_settings.upscaler == UPSCALE_BILINEAR ? "bilinear" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "metalfx",
         g_settings.upscaler_auto ? "default" : "chosen", res_name(g_settings.res_mode), g_settings.res_auto ? "default" : "chosen",
         g_settings.dyn_res ? ", dynamic" : "", g_settings.antialias == AA_SMAA ? "smaa" : "off");
+}
+
+// The online settings (LA-Online), one row each: the ini key, the field, and its range - a value out of it, or not a
+// number, leaves the default (g_settings' initializer above). A bool's range is 0..1.
+#define ONLINE_BOOL(name) {#name, offsetof(Settings, name), true, 0, 1}
+#define ONLINE_INT(name, lo, hi) {#name, offsetof(Settings, name), false, lo, hi}
+static const struct { const char *key; size_t at; bool is_bool; int lo, hi; } k_online[] = {
+    ONLINE_INT(laonline_play_mode, 0, 3),
+    ONLINE_BOOL(laonline_username),
+    ONLINE_BOOL(laonline_chat), ONLINE_BOOL(laonline_bubbles), ONLINE_BOOL(laonline_typing),
+    ONLINE_INT(laonline_chat_seconds, 3, 15),
+    ONLINE_BOOL(laonline_markers), ONLINE_BOOL(laonline_hearts), ONLINE_BOOL(laonline_indicators),
+    ONLINE_BOOL(laonline_feed), ONLINE_BOOL(laonline_always_feed), ONLINE_INT(laonline_feed_seconds, 3, 15),
+    ONLINE_BOOL(laonline_minimap), ONLINE_BOOL(laonline_dungeon_minimap), ONLINE_INT(laonline_minimap_size, 0, 1),
+    ONLINE_BOOL(laonline_death_notices), ONLINE_INT(laonline_death_style, 0, 1),
+    ONLINE_BOOL(laonline_item_tracker),
+    ONLINE_INT(laonline_tracker_x, 0, 100), ONLINE_INT(laonline_tracker_y, 0, 100),
+    ONLINE_INT(laonline_tracker_opacity, 20, 100), ONLINE_INT(laonline_tracker_size, 0, 2),
+    ONLINE_BOOL(laonline_shared_items), ONLINE_BOOL(laonline_pickup_notifications),
+    ONLINE_BOOL(laonline_collection_counters),
+    ONLINE_BOOL(laonline_sync_story), ONLINE_BOOL(laonline_sync_supplies), ONLINE_BOOL(laonline_sync_keys),
+    ONLINE_BOOL(laonline_sync_upgrades), ONLINE_BOOL(laonline_sync_souls), ONLINE_BOOL(laonline_sync_world),
+};
+#undef ONLINE_BOOL
+#undef ONLINE_INT
+
+static bool online_parse(const char *key, const char *val) {  // (false: not an online key)
+    for (size_t i = 0; i < sizeof k_online / sizeof *k_online; i++) {
+        if (strcmp(key, k_online[i].key)) continue;
+        char *end;
+        long v = strtol(val, &end, 10);
+        if (end == val || v < k_online[i].lo || v > k_online[i].hi) return true;
+        char *p = (char *)&g_settings + k_online[i].at;
+        if (k_online[i].is_bool) *(bool *)p = v != 0;
+        else *(int *)p = (int)v;
+        return true;
+    }
+    return false;
+}
+
+static void online_save(FILE *f) {
+    for (size_t i = 0; i < sizeof k_online / sizeof *k_online; i++) {
+        const char *p = (const char *)&g_settings + k_online[i].at;
+        fprintf(f, "%s = %d\n", k_online[i].key, k_online[i].is_bool ? (int)*(const bool *)p : *(const int *)p);
+    }
 }
 
 void settings_load(void) {
@@ -381,6 +435,7 @@ void settings_load(void) {
             g_settings.coop_zoom_indoor = atoi(val) < 0 ? 0 : atoi(val) > COOP_ZOOM_MAX ? COOP_ZOOM_MAX : atoi(val);
         else if (!strcmp(key, "coop_camera_fit")) g_settings.coop_camera_fit = atoi(val) != 0;
         else if (!strcmp(key, "coop_leash")) g_settings.coop_leash = atoi(val) != 0;
+        else if (online_parse(key, val)) {}
         else if (!strcmp(key, "coop_colours")) {  // (one colour set per player, comma-separated)
             const char *p = val;
             for (int i = 0; i < 8 && *p; i++) {
@@ -546,6 +601,7 @@ void settings_save(void) {
     fprintf(f, "coop_colours = %d,%d,%d,%d,%d,%d,%d,%d\n", g_settings.coop_colour[0], g_settings.coop_colour[1],
             g_settings.coop_colour[2], g_settings.coop_colour[3], g_settings.coop_colour[4], g_settings.coop_colour[5],
             g_settings.coop_colour[6], g_settings.coop_colour[7]);
+    online_save(f);
     for (int i = 0; i < 8; i++)
         if (g_settings.coop_pad_path[i][0]) fprintf(f, "coop_pad_path_%d = %s\n", i + 1, g_settings.coop_pad_path[i]);
     fprintf(f, "timer_position = %s\n", g_settings.timer_pos == TIMER_POS_RIGHT ? "right" : "left");

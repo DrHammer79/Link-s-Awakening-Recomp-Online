@@ -773,13 +773,16 @@ static void commit(HostFs *fs) {
     extern void pace_hitch(const char *why);  // nvn/pace.c
     extern uint64_t renderer_present_count(void);
     if (fs->npending) pace_hitch("a save commit"), g_save_frame = renderer_present_count();
+    extern void lao_dev_save(const char *path, int committed);  // (online play's save journal: laonline_dev_events.c)
     for (int i = 0; i < fs->npending; i++) {
         const char *path = fs->pending[i];
+        bool committed = !fs->failed[i] && commit_slot(path);
+        int error = errno;  // (commit_slot's, before anything else can change it)
+        lao_dev_save(path, committed);
         if (fs->failed[i]) {
             drop_slot(path);
             save_failed(fs, "dropped the failed save", path, 0);
-        } else if (!commit_slot(path)) {
-            int error = errno;
+        } else if (!committed) {
             char pending[1200];
             struct stat st;
             snprintf(pending, sizeof pending, "%s.pending", path);

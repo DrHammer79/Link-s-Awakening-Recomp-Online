@@ -246,6 +246,7 @@ static const char *host_sym(uint64_t pc, uint64_t *offset) {
 }
 
 void rt_fatal_trace(void) {
+    { extern void dev_events_crash(void); dev_events_crash(); }  // (online play's diagnostic journal: dev_events.c)
     fprintf(stderr, "host backtrace (guest functions are f_<addr>):\n");
     plat_print_backtrace();
     Cpu *c = kernel_current_cpu();
@@ -340,6 +341,7 @@ bool rt_fault_watch(uint64_t fa, uint64_t pc) {
 }
 
 void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {
+    { extern void dev_events_crash(void); dev_events_crash(); }  // (online play's diagnostic journal: dev_events.c)
     rt_crash_fault(what, fa, pc);
     uint64_t po = 0, lo = 0;
     const char *ps = host_sym(pc, &po), *ls = host_sym(lr, &lo);

@@ -127,6 +127,25 @@ typedef struct {
     bool coop_leash;     // co-op: a player out of the camera's view for 3 s is put back on Player 1
     int coop_colour[8];  // co-op: each player's colour (0..COOP_COLOURS-1: the co-op Playerlink.bfres colour sets)
     char coop_pad_path[8][160];  // co-op: each player's controller, by SDL's device path, as assigned (empty: none)
+    // online play (LA-Online, runtime/hle/laonline*.c; off unless laonline.ini sets a mode): what this player shows and
+    // what he takes in from the others. Keys, ranges and defaults: k_online in settings.c.
+    int laonline_play_mode;  // 0 Co-op, 1 Co-op Randomizer, 2 Global, 3 Global Randomizer
+    bool laonline_username;  // the others' name and hearts above their Links
+    bool laonline_chat, laonline_bubbles, laonline_typing;  // chat, its speech bubbles, the "typing" mark
+    int laonline_chat_seconds;                              // a chat line shows this long (3..15 s)
+    bool laonline_markers, laonline_hearts, laonline_indicators;  // the others on the map, their hearts, off-screen arrows
+    bool laonline_feed, laonline_always_feed;  // the news feed (joins, pickups, deaths), also outside the pause menu
+    int laonline_feed_seconds;                 // a feed line shows this long (3..15 s)
+    bool laonline_minimap, laonline_dungeon_minimap;  // the overworld and dungeon minimaps with the others on them
+    int laonline_minimap_size;                        // 0 small, 1 large
+    bool laonline_death_notices;  // "X fell" notices
+    int laonline_death_style;     // 0 a toast, 1 the feed
+    bool laonline_item_tracker;   // the team's items in a corner
+    int laonline_tracker_x, laonline_tracker_y, laonline_tracker_opacity, laonline_tracker_size;  // ... where and how
+    bool laonline_shared_items, laonline_pickup_notifications, laonline_collection_counters;  // the team's pickups
+    // co-op sync: what this player takes in from the team (each player chooses his own)
+    bool laonline_sync_story, laonline_sync_supplies, laonline_sync_keys, laonline_sync_upgrades, laonline_sync_souls;
+    bool laonline_sync_world;  // picked-up items, opened pots and cut item bushes (Co-op Randomizer)
     bool diff_ohko;      // any hit kills
     bool diff_hero;      // Hero Mode flag forced on in the loaded save (2x damage, no recovery hearts)
     // cosmetics (Cosmetics tab, runtime/ui/menu.mm), live, never part of a seed: colour rows of the shared palette

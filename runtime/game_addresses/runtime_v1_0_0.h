@@ -106,3 +106,39 @@ GA_ADDR(ACTOR_TYPES,                      0x0)
 // Local co-op (runtime/hle/coop/spawn.inc; 0 = not in this version): the game manager's player set (x0 the manager,
 // x1 a shared_ptr: its +0x4b8 / +0x4c0 assigned, references counted)
 GA_ADDR(COOP_SET_PLAYER,                  0x0)
+// Online play (runtime/hle/laonline*.c), from LA-Online V15.2 (found on 1.0.0; 1.0.1's checked against its code: the
+// same instructions, calls and vtable slots - two functions moved by 0xd0). Another PC's player is a Shadow Link actor:
+// his Pop entrance (shown, rising, hits off)
+GA_ADDR(LAONLINE_SL_POP,                  0x7000d117c0)
+// ... shown again (x1 1), his +0x1700 "shown" mark
+GA_ADDR(LAONLINE_SL_SHOW,                 0x7000d14820)
+// an empty function (ret): his states' updates made this
+GA_ADDR(LAONLINE_SL_STATE_NOP,            0x7000d10050)
+// a bl to the transform's position setter (its target read)
+GA_ADDR(LAONLINE_SL_POSITION_CALL,        0x7000d15b08)
+// ... and to its rotation setter
+GA_ADDR(LAONLINE_SL_ROTATION_CALL,        0x7000d106c8)
+// his model set-up (Shadow Link vtable +0x20)
+GA_ADDR(LAONLINE_SL_SETUP,                0x7000d09e30)
+// ... returned to here when his actor is made
+GA_ADDR(LAONLINE_SL_SETUP_RET,            0x7000d07738)
+// a resource handle to its archive (as Link's model is found)
+GA_ADDR(LAONLINE_RESOURCE_GET,            0x7000057d50)
+// the model component's vtable
+GA_ADDR(LAONLINE_MODEL_COMPONENT_VT,      0x7001c4a060)
+// ... its model instance's
+GA_ADDR(LAONLINE_MODEL_INSTANCE_VT,       0x7001c47640)
+// a mesh of a model instance shown / hidden (x1 index, x2 on)
+GA_ADDR(LAONLINE_MESH_SET_VISIBLE,        0x700104fae0)
+// his movement collider component's vtable
+GA_ADDR(LAONLINE_COLLIDER_VT,             0x7001c17278)
+// ... its "set enabled" (vtable +0xa8)
+GA_ADDR(LAONLINE_COLLIDER_SET_ENABLED,    0x70010b5d40)
+// a recovery heart item's vtable
+GA_ADDR(LAONLINE_HEART_VT,                0x7001bc7268)
+// ... its pickup (a vtable slot)
+GA_ADDR(LAONLINE_HEART_PICKUP_SLOT,       0x7001bc7680)
+// ... that function
+GA_ADDR(LAONLINE_HEART_PICKUP,            0x70008a3960)
+// the game's UI pages list (its sentinel node)
+GA_ADDR(LAONLINE_UI_REGISTRY,             0x7001c97b10)

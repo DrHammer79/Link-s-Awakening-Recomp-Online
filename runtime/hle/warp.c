@@ -300,6 +300,16 @@ static int player_component_missing(void) {
     return !o || !LD64(o + 0x618);
 }
 
+// Online play (runtime/hle/laonline.c): the level is ready for remote players' Links - in play, no level change of
+// the game's own or a warp pending, the player component there, and WARP_SETTLE frames since the last load, as a warp
+// waits for.
+int laonline_level_ready(void) {
+    watch_level_change(g_frame_now);
+    return game_in_play() && !g_change && !g_pending &&
+           !(g_warp_waiting && g_loads == g_loads_at_warp && g_frame_now - g_warp_frame < WARP_TIMEOUT) &&
+           !player_component_missing() && g_frame_now - g_load_frame >= WARP_SETTLE;
+}
+
 // Game main thread, once per frame (from the controller read): if a warp is queued, build a request with
 // the fields main+0x81b950 fills and hand it to the game's own request processor.
 void warp_game_tick(Cpu *c) {
@@ -774,6 +784,15 @@ static void actor_scan_tick(uint64_t frame) {
 void give_item_tick(Cpu *c, uint64_t frame) {
     actor_scan_tick(frame);
     { extern void miniboss_tick(Cpu *, uint64_t); miniboss_tick(c, frame); }
+    {  // online play (off unless laonline.ini sets a mode): its UI state, the remote players' Links, Z-targeting,
+       // the team's pickups (runtime/hle/laonline*.c, ztarget.c)
+        extern void laonline_ui_tick(uint64_t), laonline_tick(Cpu *, uint64_t), ztarget_tick(Cpu *, uint64_t),
+            laonline_coop_tick(Cpu *, uint64_t);
+        laonline_ui_tick(frame);
+        laonline_tick(c, frame);
+        ztarget_tick(c, frame);
+        laonline_coop_tick(c, frame);
+    }
     { extern void escape_tick(Cpu *, uint64_t); escape_tick(c, frame); }
     { extern void hint_sheet_tick(Cpu *, uint64_t); hint_sheet_tick(c, frame); }  // (runtime/hle/hint_sheet.c)
     { extern void rescue_tick(uint64_t); rescue_tick(frame); }  // (softlock rescues: runtime/hle/rescue.c)
@@ -785,6 +804,7 @@ void give_item_tick(Cpu *c, uint64_t frame) {
     { extern void triforce_tick(void); triforce_tick(); }  // (Triforce hunt: the get message's flags, triforce.c)
     { extern void hookshot_tour_tick(uint64_t frame); hookshot_tour_tick(frame); }
     { extern void flags_ext_tick(void); flags_ext_tick(); }  // (game thread: flag gets / sets happen here too)
+    { extern void lao_dev_tick(uint64_t); lao_dev_tick(frame); }  // (online play's save-structure journal, after it)
     { extern void enemy_stairs_tick(void); enemy_stairs_tick(); }  // (after it: Armos stairs flags, enemy_random.c)
     { extern void rt_powder_flag_tick(void); rt_powder_flag_tick(); }  // (found powder: keysanity.c)
     { extern void silent_pickups_tick(uint64_t); silent_pickups_tick(frame); }  // (a silent Heart Container's refill)

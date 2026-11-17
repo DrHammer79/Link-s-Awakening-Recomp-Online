@@ -1040,6 +1040,32 @@ SHADOW_LINK_APPEAR_SITE = A.SHADOW_LINK_APPEAR_SITE
 # and the area's own music plays on (runtime/hle/miniboss.c rt_shadow_link_bgm).
 SHADOW_LINK_BGM_SITE = A.SHADOW_LINK_BGM_SITE
 
+# Online play (runtime/hle/laonline.c): another PC's player is a Shadow Link actor moved to where that player is. His
+# update's entry (sub sp, sp, #0x40) asks laonline_native_shadow_update first, which skips the rest of it for such a
+# puppet - his targeting, his choices, his reactions to hits - while his model and animation components still update;
+# the animation player's entry (sub sp, sp, #0x60) lets laonline_native_animation see each animation played (the local
+# Link's are sent, the remote player's played on his puppet). The Game Over event just submitted (ldr x20, [sp, #0x18],
+# after Common.bfevfl GameOver's EventManager::Submit) tells the others (laonline_death.c).
+LAONLINE_GAMEOVER_SITE = A.LAONLINE_GAMEOVER_SITE
+
+
+def _laonline_shadow_update(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd10103ff, hex(w)  # sub sp, sp, #0x40
+    return ('{ extern int laonline_native_shadow_update(Cpu *); if (laonline_native_shadow_update(c)) return; '
+            f'c->sp -= 0x40; }}  /* {a:#x}: sub sp, sp, #0x40 (Shadow Link update: online play\'s puppet) */')
+
+
+def _laonline_animation(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd10183ff, hex(w)  # sub sp, sp, #0x60
+    return ('{ extern void laonline_native_animation(Cpu *); laonline_native_animation(c); c->sp -= 0x60; }'
+            f'  /* {a:#x}: sub sp, sp, #0x60 (an animation played: online play) */')
+
+
+PATCHES[A.LAONLINE_SHADOW_UPDATE_SITE] = _laonline_shadow_update
+PATCHES[A.LAONLINE_ANIMATION_SITE] = _laonline_animation
+
 # An actor's AI starting one of its events (main+0x94a510, x20 = the AI, flow name at [x29-0x40]): right before it
 # builds the event request (bl main+0x80c290). Any event request holds Link still while it runs; a randomizer item
 # picked up from the ground (a SinkingSword item actor) whose entry only sets its flag and adds a rupee / heart /
@@ -1102,6 +1128,7 @@ HOOKS = {
     MSTALFOS_JUMP_SITE: (0x1e213800, (), 'fsub s0, s0, s1: Master Stalfos jump arc from his takeoff height'),
     SHADOW_LINK_APPEAR_SITE: (0xf9411809, (A.SHADOW_LINK_APPEAR_SKIP,), 'ldr x9, [x0, #0x230]: Shadow Link, no Appear event on the Field'),
     SHADOW_LINK_BGM_SITE: (0x97ff5eac, (), 'bl main+0xce8ce0: Shadow Link starts his chamber music, not outside it'),
+    LAONLINE_GAMEOVER_SITE: (0xf9400ff4, (), 'ldr x20, [sp, #0x18]: the Game Over event submitted (online play)'),
     ACTOR_EVENT_SITE: (0x97fb074a, (A.ACTOR_EVENT_SKIP,), 'bl main+0x80c290: an actor\'s event request (quick pickups: none)'),
     MCHIEF_STORY_SITE: (0x37380148, (A.MCHIEF_STORY_SKIP,), 'tbnz w8, #7: Moblin Chief, no story check on the Field'),
     DIG_HOLE_SITE: (0xf94007f6, (), 'ldr x22, [sp, #8]: a hole was dug (digs.c)'),

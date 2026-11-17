@@ -221,6 +221,7 @@ static void boot(const char *root) {
     loader_load(exefs);
     rando_boot();  // the chosen seed's data patches go into the freshly loaded module
     { extern void settings_load(void); settings_load(); }
+    { extern void laonline_resume_launch_mode(void); laonline_resume_launch_mode(); }  // (online play: laonline.c)
     kernel_init();
     dispatch_init();
 
@@ -359,6 +360,7 @@ int main(int argc, char **argv) {
         extern bool load_save_prepare(void);
         if (load_save_prepare()) skip_launcher = true;
     }
+    { extern void dev_events_init(void); dev_events_init(); }  // (online play's diagnostic journal, in the data root)
     if (getenv("LARECOMP_MENU_SFX_TEST")) {  // (test: the menu sounds loaded now, each logged)
         extern void menu_sfx_set_game_dir(const char *dir);
         extern void menu_sfx_load_now(void);

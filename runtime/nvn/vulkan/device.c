@@ -2046,6 +2046,9 @@ void backend_quit(void) {
 // teardown (driver / validation-layer threads can stall it for minutes while the game's threads still run).
 static void quick_exit_handler(void) {
     backend_quit();
+    // The process ends below without the later atexit handlers: online play's diagnostic journal is written out first
+    // (runtime/dev_events.c), after the renderer stopped and before the other threads end.
+    { extern void dev_events_shutdown(void); dev_events_shutdown(); }
     if (validating) validation_exit();
     fflush(stdout);
     fflush(stderr);

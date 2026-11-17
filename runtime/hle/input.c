@@ -142,6 +142,10 @@ void input_rumble_poll(void) {
                          NULL, now);
     }
 }
+// Online PvP: a short buzz on Player 1's controller when another player's attack hits him (laonline_v12.c).
+void input_hit_rumble(int ms) {
+    if (pad && ms > 0) SDL_RumbleGamepad(pad, 0xB000, 0xD000, (Uint32)ms);
+}
 void input_rumble_stop(void) {  // UI thread: also called before normal app exit
     rumble_clear();
     atomic_store(&rumble_frame_ms, 0);
@@ -883,6 +887,10 @@ void input_handle_event(const SDL_Event *e) {
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
         if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) g_debug_frame_request = 1;
+        if (e->key.scancode >= SDL_SCANCODE_F6 && e->key.scancode <= SDL_SCANCODE_F8) {  // online play: F6 PvP on / off,
+            extern void laonline_v12_key(int, int, int);                                // F7 the dive assist, F8 lock-on
+            laonline_v12_key(6 + (e->key.scancode - SDL_SCANCODE_F6), e->type == SDL_EVENT_KEY_DOWN, e->key.repeat);
+        }
         if (e->type == SDL_EVENT_KEY_DOWN && (e->key.scancode == SDL_SCANCODE_F10 || e->key.scancode == SDL_SCANCODE_BACKSLASH) && !e->key.repeat) g_interp_ring_request = 1;
         if (e->key.scancode < SDL_SCANCODE_COUNT) keys_down[e->key.scancode] = e->type == SDL_EVENT_KEY_DOWN;
         uint64_t before = key_buttons;
@@ -1430,9 +1438,21 @@ static void fill_state(Cpu *c) {
         extern uint64_t load_save_buttons(void);
         b |= load_save_buttons();
     }
+    {   // online play, on this PC's Player 1 (runtime/hle/laonline_v12.c, ztarget.c): B and R3 seen for PvP and the dive
+        // assist, ZL as Z-targeting
+        extern uint64_t laonline_v12_input(uint64_t, int), ztarget_input(uint64_t, int);
+        b = laonline_v12_input(b, menu);
+        b = ztarget_input(b, menu);
+    }
     int32_t tlx, tly;
     touch_stick(&tlx, &tly);
     int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + tlx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + tly) + script_ly);
+    if (!menu) {  // online play: a PvP hit staggers (the stick held still), Z-targeting circles the target
+        extern int laonline_v12_stagger(void);
+        extern void ztarget_stick(int32_t *, int32_t *);
+        if (laonline_v12_stagger()) lx = ly = 0;
+        ztarget_stick(&lx, &ly);
+    }
     int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry) + script_ry);
     if (!menu) {  // d-pad items (setting): the Items page assigns, play uses (runtime/hle/dpad_items.c; before mirroring:
         extern uint64_t dpad_items_input(uint64_t b);  // the d-pad as held)
