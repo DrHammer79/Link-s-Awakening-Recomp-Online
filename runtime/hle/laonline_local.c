@@ -166,9 +166,10 @@ typedef struct {
 // Player 1's relay login (laonline_relay_login) and a key for it: the relay, the lobby, the password and the name.
 // 0: online play isn't on through the relay.
 static int relay_login(char host[96], char port[16], char name[17], char lobby[33], char password[65], char *key, size_t cap) {
-    if (!laonline_relay_login(host, 96, port, 16, name, lobby, password)) { if (cap) key[0] = 0; return 0; }
-    snprintf(key, cap, "%s:%s %s %s %s", host, port, lobby, password, name);
-    return 1;
+    int launch = laonline_relay_login(host, 96, port, 16, name, lobby, password);
+    if (!launch) { if (cap) key[0] = 0; return 0; }
+    snprintf(key, cap, "%d %s:%s %s %s %s", launch, host, port, lobby, password, name);
+    return launch;  // (3: Global - its HELLO is 0x31)
 }
 
 static int send_frame(sock_t s, const uint8_t *body, int n) {
@@ -211,7 +212,8 @@ static void conn_close(Conn *k, int i) {
 
 static int conn_open(Conn *k, int i, uint32_t rgb) {
     char host[96], port[16], name[17], lobby[33], password[65], key[200];
-    if (!relay_login(host, port, name, lobby, password, key, sizeof key)) return 0;
+    int launch = relay_login(host, port, name, lobby, password, key, sizeof key);
+    if (!launch) return 0;
     struct addrinfo hints, *res = NULL;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_INET, hints.ai_socktype = SOCK_STREAM;
@@ -235,7 +237,7 @@ static int conn_open(Conn *k, int i, uint32_t rgb) {
     snprintf(me, sizeof me, "%.13s P%d", name, i + 1);
     uint8_t b[300];
     int n = 0;
-    b[n++] = 0x01;           // HELLO (Story Co-op / Co-op Randomizer: the lobby says which)
+    b[n++] = launch == 3 ? 0x31 : 0x01;  // HELLO (Story Co-op / Co-op Randomizer: the lobby says which; Global: 0x31)
     b[n++] = 1, b[n++] = 0;  // protocol version 1
     size_t l = strlen(me); b[n++] = (uint8_t)l; memcpy(b + n, me, l); n += (int)l;
     b[n++] = (uint8_t)(rgb >> 16), b[n++] = (uint8_t)(rgb >> 8), b[n++] = (uint8_t)rgb;

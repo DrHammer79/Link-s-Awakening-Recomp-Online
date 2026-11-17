@@ -98,6 +98,10 @@ chat, PvP and Z-targeting. Thank you for it. Here it runs on game 1.0.0 and 1.0.
   friends) or a public one, or join one by its code or from the list of public sessions. Everyone presses Ready and
   the host starts it. While a randomizer seed is played, the session is a Co-op Randomizer one on that seed (the others
   play the same seed). Leaving the session on the page ends online play.
+- **Global** (the Online page's Global tab): everyone playing online at once, each in their own world - your own
+  save, and your own seed while you play one - seen together, with PvP and the kill feed.
+- **Leaderboards** (its Leaderboards tab): the completed runs players reported, by time, score, rupees or deaths;
+  submit your own there.
 - **Several players on one PC:** each local co-op player goes online as a player of their own ("Name P2", ...), with
   their own Link, hearts and colour, their own PvP (each turns it on with their own R3) and their own Z-target (their
   ZL). Progress, items and the save stay one per PC.

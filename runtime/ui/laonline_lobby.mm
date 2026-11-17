@@ -1,6 +1,7 @@
 // The menu's Online page: LA-Online's sessions on its relay. Host a private session (a room code to share) or a public
 // one, join one by its code or from the public list, mark Ready; the host starts it, and online play then runs in that
-// session (laonline_session_override + laonline_launch_mode: the relay lobby, password and name the room gives).
+// session (laonline_session_override + laonline_launch_mode: the relay lobby, password and name the room gives). Its
+// Global tab joins Global (everyone, each in his own world); its Leaderboards tab lists and takes completed runs.
 //
 // From LA-Online V15.2's runtime/ui/session_ui.mm (MIT (c) ThyHeroOfTime, LICENSE-LA-Online): the session service's
 // protocol (relay opcode 0x30, actions 0..9: docs/laonline-protocol.md) and its rules - the 2 s room poll, a press
@@ -346,15 +347,23 @@ static void try_launch(const Directory &d, const Room &room) {
            lobby.c_str(), room.mode == 2 ? "co-op randomizer" : "co-op");
 }
 
-// (test) LAONLINE_TEST_LOBBY=host | host-public | join:<code> | browse: what a player would press, once a save is
-// loaded - then Ready, and the host starts the session once every player (2 or more) is ready (tools/coop_tests/
-// online_lobby.sh). The same requests the page's buttons make.
+static void global_join(void);
+static void board_test(void);
+// (test) LAONLINE_TEST_LOBBY=host | host-public | join:<code> | browse | global | board: what a player would press,
+// once a save is loaded - then Ready, and the host starts the session once every player (2 or more) is ready; global:
+// Join Global; board: a run submitted, then the leaderboard read (tools/coop_tests/online_lobby.sh, online_global.sh).
+// The same requests the page's buttons make.
 static void test_drive(const Directory &d) {
     static const char *plan = getenv("LAONLINE_TEST_LOBBY");
     static uint64_t at;
     if (!plan || !game_in_play() || g_busy.load() || now_ms() < at) return;
     at = now_ms() + 1500;
     bool in_room = !d.token.empty() && !d.rooms.empty();
+    if (strstr(plan, "global") || strstr(plan, "board")) {  // (either, or both: "global,board")
+        if (strstr(plan, "global") && laonline_launch_choice() != 3) global_join();
+        if (strstr(plan, "board")) board_test();
+        return;
+    }
     if (!in_room) {
         if (!strcmp(plan, "host")) request(1);
         else if (!strcmp(plan, "host-public")) request(2);
@@ -620,8 +629,272 @@ static void start_view(const Directory &d, float s) {
     ImGui::Spacing();
     if (busy) ImGui::TextUnformatted(L("Contacting the relay..."));
     else if (!d.message.empty()) ImGui::TextWrapped("%s", L(d.message.c_str()));
-    if (laonline_launch_choice() && !g_launched)
+    int choice = laonline_launch_choice();
+    if ((choice == 1 || choice == 2) && !g_launched)
         ImGui::TextDisabled("%s", L("Online play is on in the lobby laonline.ini names. A session picked here takes its place."));
+}
+
+// ---------------------------------------------------------------- Global (relay opcode 0x33: how many are in it)
+// Global (V15.2's start screen's Play Online Global): everyone playing online at once, each in his own world - his
+// own save, his own seed (Global Randomizer while a seed is played) - seen together, with PvP and the kill feed; no
+// shared progress. Online play's launch mode 3 (laonline.c: HELLO 0x31, the Global lobby); this PC's other local
+// players join it too (laonline_local.c).
+extern "C" void laonline_v12_global_variant(int randomizer);
+static std::atomic<bool> g_global_busy(false);
+static int g_global_count = -1;  // (g_lock) -1: not known
+static bool g_global_failed;
+static uint64_t g_global_at;
+static void global_poll(void) {  // the count, every 2 s while the Global tab is shown (his)
+    if (now_ms() < g_global_at || g_global_busy.exchange(true)) return;
+    g_global_at = now_ms() + 2000;
+    std::string address = g_endpoint;
+    std::thread([address]() {
+        int count = -1;
+        try {
+            auto d = exchange(address, {1}, 0x33);
+            Wire r{d};
+            if (r.byte() != 1) throw std::runtime_error("Global unavailable");
+            count = r.word();
+            int capacity = r.word();
+            if (count > capacity || capacity != 100 || r.i != d.size()) throw std::runtime_error("Invalid Global status");
+        } catch (const std::exception &) { count = -1; }
+        { std::lock_guard<std::mutex> lock(g_lock); g_global_count = count, g_global_failed = count < 0; }
+        g_global_busy = false;
+    }).detach();
+}
+static void global_join(void) {
+    Directory d;
+    { std::lock_guard<std::mutex> lock(g_lock); d = g_member; }
+    if (!d.token.empty()) leave(d);  // (a session this player is in: left first)
+    int rando = rando_seed_dir() != nullptr;
+    std::string name = g_name[0] ? g_name : "Player";
+    laonline_session_override(name.c_str(), "", "");  // (the name; Global's lobby is its own, with no password)
+    laonline_v12_global_variant(rando);
+    laonline_launch_mode(3);
+    g_launched = false, g_note.clear();
+    LOG("[lobby] Global%s: online play as '%s'\n", rando ? " Randomizer" : "", name.c_str());
+}
+static void global_leave(void) {
+    laonline_launch_mode(0);
+    laonline_session_override(nullptr, nullptr, nullptr);
+    LOG("[lobby] left Global: online play off\n");
+}
+static void global_view(float s) {
+    global_poll();
+    int count; bool failed;
+    { std::lock_guard<std::mutex> lock(g_lock); count = g_global_count, failed = g_global_failed; }
+    ImGui::TextWrapped("%s", L("Everyone playing online, each in their own world - your own save, and your own seed while you play one - "
+                               "seen together, with PvP and the kill feed. Nothing is shared between worlds."));
+    if (count >= 0) ImGui::Text(count == 1 ? L("%d player in Global") : L("%d players in Global"), count);
+    else ImGui::TextDisabled("%s", failed ? L("Global player count unavailable") : L("Checking Global player count..."));
+    ImGui::Spacing();
+    bool rando = rando_seed_dir() != nullptr;
+    if (laonline_launch_choice() == 3) {
+        ImGui::TextColored(ImVec4(.2f, .75f, .35f, 1), "%s", L("You are in Global."));
+        if (ImGui::Button(L("Leave Global"), ImVec2(320 * s, 0))) global_leave();
+        return;
+    }
+    if (ImGui::Button(rando ? L("Join Global Randomizer (your seed)") : L("Join Global"), ImVec2(320 * s, 0))) global_join();
+    Directory d;
+    { std::lock_guard<std::mutex> lock(g_lock); d = g_member; }
+    if (!d.token.empty()) ImGui::TextDisabled("%s", L("Joining Global leaves your session."));
+}
+
+// ---------------------------------------------------------------- Leaderboards (relay opcode 0x32)
+// V12.5's leaderboards: completed runs the players reported (not checked by anyone), ranked by the relay. 50 a page,
+// filters by mode and player count; an older (V12) relay answers 8 a page without them (his fallback, kept).
+// Score = 100,000 - clear time in seconds - 250 per death + rupees (the relay's; at least 0).
+struct LeaderRun { std::string players; unsigned mode, count, seconds, rupees, deaths, score; };
+static std::mutex g_board_lock;
+static std::atomic<bool> g_board_busy(false);
+static std::vector<LeaderRun> g_board;
+static std::string g_board_status;
+static int g_board_total, g_board_page, g_board_mode = 3, g_board_sort, g_board_count, g_board_page_size = 50;
+static bool g_board_loaded, g_board_legacy;
+static unsigned board_score(unsigned seconds, unsigned deaths, unsigned rupees) {
+    long long v = 100000LL - seconds - 250LL * deaths + rupees;
+    return v < 0 ? 0 : (unsigned)v;
+}
+static void board_request(bool submit, const std::string &players = "", int mode = 0, int seconds = 0, int rupees = 0, int deaths = 0) {
+    if (g_board_busy.exchange(true)) return;
+    auto word = [](std::vector<uint8_t> &b, unsigned v, int n) { for (int i = 0; i < n; i++) b.push_back((uint8_t)(v >> (i * 8))); };
+    std::vector<uint8_t> b = {1, (uint8_t)(submit ? 1 : 0)}, v2 = {2, 0}, v1 = {1, 0};
+    if (submit) {
+        char id[65];
+        snprintf(id, sizeof id, "run-%llu-%u", (unsigned long long)SDL_GetTicksNS(), (unsigned)SDL_rand(2147483647));
+        put_str(b, id), put_str(b, players);
+        b.push_back((uint8_t)mode);
+        word(b, (unsigned)seconds, 4), word(b, (unsigned)rupees, 4), word(b, (unsigned)deaths, 4);
+        b.push_back(1);
+    } else {
+        v2.push_back((uint8_t)g_board_mode), v2.push_back((uint8_t)g_board_sort), v2.push_back((uint8_t)g_board_count);
+        word(v2, (unsigned)g_board_page, 2);
+        v1.push_back((uint8_t)g_board_mode), v1.push_back((uint8_t)(g_board_sort == 2 ? 1 : 0));  // (V12: time / rupees)
+        word(v1, (unsigned)g_board_page, 2);
+    }
+    std::string address = g_endpoint;
+    std::thread([b, v1, v2, submit, address]() {
+        std::vector<LeaderRun> rows;
+        std::string message;
+        int total = 0;
+        bool legacy = false;
+        auto number = [](Wire &r) { unsigned v = 0; for (int i = 0; i < 4; i++) v |= (unsigned)r.byte() << (i * 8); return v; };
+        try {
+            if (submit) {
+                auto d = exchange(address, b, 0x32);
+                Wire r{d};
+                bool ok = r.byte() == 1;
+                message = r.string();
+                if (ok) message = "Run submitted. " + message;
+            } else {
+                auto d = exchange(address, v2, 0x32);
+                Wire r{d};
+                bool ok = r.byte() == 1;
+                message = r.string();
+                if (ok) {
+                    total = r.word();
+                    int count = r.byte();
+                    if (count > 50) throw std::runtime_error("Invalid ranking count.");
+                    for (int i = 0; i < count; i++) {
+                        LeaderRun run;
+                        run.players = r.string(), run.mode = r.byte(), run.count = r.byte();
+                        run.seconds = number(r), run.rupees = number(r), run.deaths = number(r), run.score = number(r);
+                        rows.push_back(run);
+                    }
+                    if (r.i != d.size()) throw std::runtime_error("Incomplete ranking response.");
+                } else {  // (an older relay: its 8-a-page answer)
+                    legacy = true;
+                    auto o = exchange(address, v1, 0x32);
+                    Wire w{o};
+                    ok = w.byte() == 1;
+                    message = w.string();
+                    if (ok) {
+                        total = w.word();
+                        int count = w.byte();
+                        if (count > 8) throw std::runtime_error("Invalid ranking count.");
+                        for (int i = 0; i < count; i++) {
+                            LeaderRun run;
+                            run.players = w.string(), run.mode = w.byte();
+                            run.seconds = number(w), run.rupees = number(w), run.deaths = number(w);
+                            w.byte();
+                            run.count = 1;
+                            for (char ch : run.players) run.count += ch == ',';
+                            if (run.count > 4) run.count = 4;
+                            run.score = board_score(run.seconds, run.deaths, run.rupees);
+                            rows.push_back(run);
+                        }
+                        if (w.i != o.size()) throw std::runtime_error("Incomplete ranking response.");
+                        message = "This relay is older than V12.5: 8 runs a page, no player-count filter.";
+                    }
+                }
+            }
+        } catch (const std::exception &e) { message = e.what(); }
+        std::lock_guard<std::mutex> lock(g_board_lock);
+        if (!submit) g_board = rows, g_board_total = total, g_board_legacy = legacy, g_board_page_size = legacy ? 8 : 50, g_board_loaded = true;
+        g_board_status = message;
+        if (!submit) LOG("[lobby] leaderboard: %d run(s)%s%s\n", total, rows.empty() ? "" : ", first: ", rows.empty() ? "" : rows[0].players.c_str());
+        else LOG("[lobby] leaderboard: %s\n", message.c_str());
+        g_board_busy = false;
+    }).detach();
+}
+static void board_test(void) {  // (LAONLINE_TEST_LOBBY=board: one run submitted, then the board read)
+    static int step;
+    if (g_board_busy.load()) return;
+    if (step == 0) { step = 1; board_request(true, g_name[0] ? g_name : "Player", 1, 3725, 120, 2); }
+    else if (step == 1) { step = 2; g_board_page = 0; board_request(false); }
+}
+static std::string clock_text(unsigned s) { char t[24]; snprintf(t, sizeof t, "%u:%02u:%02u", s / 3600, s / 60 % 60, s % 60); return t; }
+static void board_view(float s) {
+    static bool asked;
+    if (!asked) asked = true, board_request(false);
+    bool busy = g_board_busy.load();
+    std::vector<LeaderRun> rows; std::string status; int total, size; bool loaded;
+    { std::lock_guard<std::mutex> lock(g_board_lock); rows = g_board, status = g_board_status, total = g_board_total, size = g_board_page_size, loaded = g_board_loaded; }
+    static const char *sorts[] = {"Best time", "Highest score", "Most rupees", "Most deaths"};
+    static const char *modes[] = {"Vanilla", "Co-op", "Co-op Randomizer", "All modes"};  // (the relay's: 0, 1, 2; 3 all)
+    static const char *counts[] = {"Any number of players", "1 player", "2 players", "3 players", "4 players"};
+    bool changed = false;
+    ImGui::BeginDisabled(busy);
+    ImGui::SetNextItemWidth(170 * s);
+    if (ImGui::BeginCombo("##sort", L(sorts[g_board_sort]))) {
+        for (int i = 0; i < 4; i++) if (ImGui::Selectable(L(sorts[i]), g_board_sort == i)) changed |= g_board_sort != i, g_board_sort = i;
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(200 * s);
+    if (ImGui::BeginCombo("##mode", L(modes[g_board_mode]))) {
+        for (int i : {3, 0, 1, 2}) if (ImGui::Selectable(L(modes[i]), g_board_mode == i)) changed |= g_board_mode != i, g_board_mode = i;
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(220 * s);
+    if (ImGui::BeginCombo("##count", L(counts[g_board_count]))) {
+        for (int i = 0; i < 5; i++) if (ImGui::Selectable(L(counts[i]), g_board_count == i)) changed |= g_board_count != i, g_board_count = i;
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(L("Refresh"))) changed = true;
+    ImGui::SameLine();
+    if (ImGui::Button(L("Submit a run..."))) ImGui::OpenPopup("##submit");
+    ImGui::EndDisabled();
+    if (changed) g_board_page = 0, board_request(false);
+    if (rows.empty()) ImGui::TextWrapped("%s", busy || !loaded ? L("Loading completed runs...") : L("No completed runs match these filters yet."));
+    else if (ImGui::BeginTable("##board", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("#", 0, .5f);
+        ImGui::TableSetupColumn(L("Players"), 0, 3);
+        ImGui::TableSetupColumn(L("Mode"), 0, 2);
+        ImGui::TableSetupColumn(L("Clear time"), 0, 1.4f);
+        ImGui::TableSetupColumn(L("Score"), 0, 1.2f);
+        ImGui::TableSetupColumn(L("Rupees"), 0, 1);
+        ImGui::TableSetupColumn(L("Deaths"), 0, 1);
+        ImGui::TableHeadersRow();
+        for (size_t i = 0; i < rows.size(); i++) {
+            const LeaderRun &r = rows[i];
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::Text("%d", g_board_page * size + (int)i + 1);
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(r.players.c_str());
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(L(modes[r.mode < 3 ? r.mode : 0]));
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(clock_text(r.seconds).c_str());
+            ImGui::TableNextColumn(); ImGui::Text("%u", r.score);
+            ImGui::TableNextColumn(); ImGui::Text("%u", r.rupees);
+            ImGui::TableNextColumn(); ImGui::Text("%u", r.deaths);
+        }
+        ImGui::EndTable();
+    }
+    int pages = total > 0 ? (total + size - 1) / size : 1;
+    if (pages > 100) pages = 100;
+    ImGui::BeginDisabled(busy || g_board_page == 0);
+    if (ImGui::Button(L("Previous"))) g_board_page--, board_request(false);
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::Text("%d / %d - %d %s", g_board_page + 1, pages, total, L("runs"));
+    ImGui::SameLine();
+    ImGui::BeginDisabled(busy || g_board_page + 1 >= pages);
+    if (ImGui::Button(L("Next"))) g_board_page++, board_request(false);
+    ImGui::EndDisabled();
+    if (!status.empty()) ImGui::TextWrapped("%s", status.c_str());
+    // a completed run, reported by the player (his: "player-reported, not independently verified")
+    static char players[81]; static int mode = 0, h = 1, m = 0, sec = 0, rupees = 0, deaths = 0; static bool honest;
+    if (ImGui::BeginPopup("##submit")) {
+        if (!players[0]) snprintf(players, sizeof players, "%s", g_name[0] ? g_name : "Player");
+        ImGui::TextWrapped("%s", L("Submit your real completed run. Runs are reported by the players, not checked."));
+        ImGui::InputText(L("Player(s)"), players, sizeof players);
+        ImGui::TextDisabled("%s", L("Co-op players separated by commas."));
+        ImGui::Combo(L("Mode"), &mode, "Vanilla\0Co-op\0Co-op Randomizer\0");
+        ImGui::SetNextItemWidth(80 * s); ImGui::InputInt(L("h"), &h, 0); ImGui::SameLine();
+        ImGui::SetNextItemWidth(80 * s); ImGui::InputInt(L("min"), &m, 0); ImGui::SameLine();
+        ImGui::SetNextItemWidth(80 * s); ImGui::InputInt(L("s"), &sec, 0);
+        ImGui::InputInt(L("Rupees"), &rupees);
+        ImGui::InputInt(L("Deaths"), &deaths);
+        ImGui::Checkbox(L("I completed this run and these results are accurate"), &honest);
+        int seconds = h * 3600 + m * 60 + sec;
+        ImGui::BeginDisabled(!honest || busy || !players[0] || seconds < 1 || h < 0 || m < 0 || sec < 0 || rupees < 0 || deaths < 0);
+        if (ImGui::Button(L("Submit"))) board_request(true, players, mode, seconds, rupees, deaths), honest = false, ImGui::CloseCurrentPopup();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button(L("Cancel"))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
 }
 
 // The page (menu.mm tabs_body, the bar's Online entry).
@@ -633,7 +906,15 @@ extern "C" void laonline_lobby_draw(float scale) {
     }
     Directory d;
     { std::lock_guard<std::mutex> lock(g_lock); d = g_member; }
-    if (!d.token.empty() && !d.rooms.empty()) room_view(d, scale);
-    else if (g_browsing) browser_view(scale);
-    else start_view(d, scale);
+    if (!d.token.empty() && !d.rooms.empty()) { room_view(d, scale); return; }  // (in a session: its room alone)
+    if (ImGui::BeginTabBar("##online")) {
+        if (ImGui::BeginTabItem(L("Sessions"))) {
+            if (g_browsing) browser_view(scale);
+            else start_view(d, scale);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(L("Global"))) { global_view(scale); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem(L("Leaderboards"))) { board_view(scale); ImGui::EndTabItem(); }
+        ImGui::EndTabBar();
+    }
 }

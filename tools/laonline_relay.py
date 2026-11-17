@@ -398,6 +398,43 @@ def session(b):
     return fail('Unknown request.')
 
 
+# ---------------------------------------------------------------- Global's player count (0x33) and the leaderboards
+# (0x32) - the Online page's Global and Leaderboards tabs. One request per connection, as the session service.
+def global_count():
+    n = sum(len(L.players) for name, L in lobbies.items() if name.startswith(b'V10-GLOBAL'))
+    return bytes([1]) + struct.pack('<HH', min(n, 100), 100)
+
+
+runs = []  # (players, mode, count, seconds, rupees, deaths, score)
+
+
+def board(b):
+    version, action = b[0], b[1]
+    if version == 1 and action == 1:  # a completed run: str id, str players, u8 mode, u32 seconds / rupees / deaths, u8 1
+        o = 2
+        n = b[o]; o += 1 + n
+        n = b[o]; players = bytes(b[o + 1:o + 1 + n]); o += 1 + n
+        mode = b[o]; o += 1
+        seconds, rupees, deaths = struct.unpack_from('<III', b, o)
+        count = min(4, players.count(b',') + 1)
+        score = max(0, 100000 - seconds - 250 * deaths + rupees)
+        runs.append((players, mode, count, seconds, rupees, deaths, score))
+        log(f'board run {players.decode(errors="replace")} mode {mode} {seconds}s')
+        return bytes([1]) + put_str(b'Thank you.')
+    if version == 2 and action == 0:  # a page: u8 mode (3 all), u8 sort, u8 player count (0 all), u16 page
+        mode, sort, count = b[2], b[3], b[4]
+        (page,) = struct.unpack_from('<H', b, 5)
+        rows = [r for r in runs if (mode == 3 or r[1] == mode) and (count == 0 or r[2] == count)]
+        key = [lambda r: r[3], lambda r: -r[6], lambda r: -r[4], lambda r: -r[5]][sort if sort < 4 else 0]
+        rows.sort(key=key)
+        shown = rows[page * 50:page * 50 + 50]
+        out = bytes([1]) + put_str(b'') + struct.pack('<H', len(rows)) + bytes([len(shown)])
+        for r in shown:
+            out += put_str(r[0]) + bytes([r[1], r[2]]) + struct.pack('<IIII', r[3], r[4], r[5], r[6])
+        return out
+    return bytes([0]) + put_str(b'Unknown request.')
+
+
 async def client(reader, writer):
     p = Player(writer)
     try:
@@ -407,8 +444,9 @@ async def client(reader, writer):
             if n == 0:
                 continue
             b = await reader.readexactly(n)
-            if p.lobby is None and b[0] == 0x30:  # (the session service: one answer, then the connection closes)
-                body = bytes([0xB0]) + session(b[1:])
+            if p.lobby is None and b[0] in (0x30, 0x32, 0x33):  # (one answer, then the connection closes)
+                body = bytes([b[0] + 0x80]) + (session(b[1:]) if b[0] == 0x30 else board(b[1:]) if b[0] == 0x32
+                                               else global_count())
                 writer.write(frame(body))
                 await writer.drain()
                 break

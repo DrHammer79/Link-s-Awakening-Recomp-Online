@@ -357,6 +357,23 @@ room. The client joins only rooms of its own build; a started room is joined str
 [inferred] (the stand-in, `tools/laonline_relay.py`): 4 places, a name already in the room gets " 2", the host
 leaving hands the room to the next player, an empty room is gone; lobby `room-<code>`, a random password.
 
+## 6b. Leaderboards (0x32) and Global's player count (0x33) [code]
+
+Both like section 6a: a connection of their own, one frame each way, the answer's opcode + 0x80
+(`runtime/ui/laonline_lobby.mm`, from V15.2's `session_ui.mm`).
+
+- **0x33** request `01`; answer `u8 ok, u16 players in Global, u16 capacity` - capacity must be 100 and players no more
+  than it, the frame exactly that long; polled every 2 s while the Global tab is shown.
+- **0x32 submit** `01, 01, str run id, str players (commas between co-op players), u8 mode (0 vanilla, 1 co-op, 2
+  co-op randomizer), u32 clear time (s), u32 rupees, u32 deaths, u8 1`; answer `u8 ok, str message`.
+- **0x32 list (V12.5)** `02, 00, u8 mode (3 all), u8 sort (0 best time, 1 highest score, 2 most rupees, 3 most
+  deaths), u8 player count (0 all, 1..4), u16 page`; answer `u8 ok, str message`, when ok `u16 total, u8 count (<= 50)`,
+  each run `str players, u8 mode, u8 player count, u32 seconds, u32 rupees, u32 deaths, u32 score`, the frame exactly
+  that long. Not ok: the client asks the older form, **0x32 list (V12)** `01, 00, u8 mode, u8 sort (0 time, 1 rupees),
+  u16 page`, answered `u8 ok, str message, u16 total, u8 count (<= 8)`, each `str players, u8 mode, u32 seconds, u32
+  rupees, u32 deaths, u8 (unused)`; the score is then worked out by the client: 100,000 - seconds - 250 x deaths +
+  rupees, at least 0.
+
 ## 7. Server behaviour the client expects
 
 | # | Behaviour | Basis |

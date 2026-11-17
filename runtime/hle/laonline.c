@@ -1092,21 +1092,23 @@ int laonline_seed_descriptor(char *id,size_t idcap,char *world,size_t worldcap,i
 
 int laonline_seed_metadata_named(const char *folder,const char *name,char *id,size_t idcap,char *error,size_t cap){char display[96];snprintf(display,sizeof display,"%s",name);return seed_metadata_request(folder,id,idcap,NULL,0,NULL,NULL,display,sizeof display,error,cap);}
 int laonline_seed_descriptor_named(char *id,size_t idcap,char *world,size_t worldcap,int *total,int *ready,char *display,size_t displaycap,char *error,size_t cap){return seed_metadata_request(NULL,id,idcap,world,worldcap,total,ready,display,displaycap,error,cap);}
-// LAS Recomp Co-Op's port: the relay login srv_thread uses - its address, name, lobby (the Randomizer's ".rando" one too)
-// and password - for this PC's other local players' own connections (laonline_local.c). 0 unless online play is
-// launched in relay mode (not Global).
+// LAS Recomp Co-Op's port: the relay login srv_thread uses - its address, name, lobby (the Randomizer's ".rando" one too;
+// Global's own, with no password) and password - for this PC's other local players' own connections (laonline_local.c).
+// Returns the launch mode (1 co-op, 2 co-op randomizer, 3 Global: its HELLO is 0x31); 0 unless online play is launched
+// in relay mode.
 int laonline_relay_login(char *host, size_t hn, char *port, size_t pn, char *name, char *lobby, char *password) {
     int launch = atomic_load(&g_launch_online);
-    if (g_cfg.mode != M_SERVER || launch < 1 || launch > 2) return 0;
+    if (g_cfg.mode != M_SERVER || launch < 1 || launch > 3) return 0;
     snprintf(host, hn, "%s", g_cfg.server);
     snprintf(port, pn, "47620");
     char *colon = strrchr(host, ':');
     if (colon) *colon = 0, snprintf(port, pn, "%s", colon + 1);
     char login_lobby[33];
     room_login(name, login_lobby, password);
-    if (launch == 2) snprintf(lobby, 33, "%.26s.rando", login_lobby);
+    if (launch == 3) snprintf(lobby, 33, "%s", laonline_v12_global_lobby()), password[0] = 0;
+    else if (launch == 2) snprintf(lobby, 33, "%.26s.rando", login_lobby);
     else snprintf(lobby, 33, "%s", login_lobby);
-    return 1;
+    return launch;
 }
 
 static void *srv_thread(void *arg) {

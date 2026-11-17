@@ -21,7 +21,7 @@ your own path 1.5 s late), `host` / `join` (two PCs, direct), `server` (his rela
   menu's **Online** page, `runtime/ui/laonline_lobby.mm` - its relay protocol and rules as he wrote them, drawn with
   the menu's own widgets, in the game instead of before it (below).
 - **Not taken:** his start screen and menus (`launcher.mm`, `menu.mm` tabs, `tropical_ui`,
-  `v10_ui`, `settings_look`, `settings_reset`), the leaderboards and Global's start page (his start screen's), the self-updater
+  `v10_ui`, `settings_look`, `settings_reset`; Global and the leaderboards are tabs of the Online page instead), the self-updater
   (`lao_updater`, `release_updates.h`), log upload and the report screen (`laonline_logs`,
   `laonline_report`, `laonline_report_send`), the D-pad shortcuts, his artwork, and his randomizer
   tracker fixes in `tracker_overlay.mm` (missing logic rooms, checks without a collected flag, the
@@ -61,6 +61,9 @@ your own path 1.5 s late), `host` / `join` (two PCs, direct), `server` (his rela
   (`laonline_lobby_frame`), so a session the host starts begins with the menu closed too; the seed a Co-op
   Randomizer room needs is the one being played (his launcher downloaded a missing one: not taken - the page says to
   play the host's seed). `laonline_lobby_config` gives it the ini's name and relay. `tools/coop_tests/online_lobby.sh`.
+  Two more tabs, his start screen's: **Global** (Join / Leave Global: launch mode 3 with his variant - Global
+  Randomizer while a seed is played - and the player count, relay 0x33) and **Leaderboards** (the completed runs,
+  filters, pages, Submit a run: relay 0x32, his V12 fallback kept). `tools/coop_tests/online_global.sh`.
 - `laonline_ui.c`: no D-pad shortcut condition. Its menu / pause check (the game's UI page list, read
   fault-safe with Windows' `ReadProcessMemory`) was Windows-only: elsewhere the game always counted as
   paused - grants never handed over, chat closed at once, death notices never re-armed. It now reads
@@ -97,6 +100,7 @@ your own path 1.5 s late), `host` / `join` (two PCs, direct), `server` (his rela
   each message), the animation hook recording the other local Links' too, the map / room passed on.
   Each connection keeps the login it joined with: when Player 1's changes (online play stopped, another session picked
   on the Online page) it leaves at once and joins the new one.
+  In Global too (`laonline_relay_login` gives Global's lobby and no password; its HELLO is 0x31).
   Relay mode only; direct host / join stays one player a side (its state packet has one).
 - PvP for each of this PC's players (`laonline_v12.c`): what V15.2 kept for Player 1 alone - his buttons
   (`laonline_v12_input`), switch, attacks, cooldowns, hits taken, knockback, stagger - is a `PvpSelf` each, [0]
@@ -158,7 +162,7 @@ The rules the review set for this fork's co-op, checked for online play (2026-11
 - **General fixes as their own changes** (point 5): `imgui_glue.cpp` (UI images freed with their context,
   an image leaked when its view failed) is its own commit, for upstream on its own.
 - **Tests in the repository** (point 9): `tools/coop_tests/online.sh`, `online_net.sh`, `online_relay.sh`,
-  `online_lobby.sh`, `online_pvp.sh`.
+  `online_lobby.sh`, `online_pvp.sh`, `online_global.sh`.
 - **Mobile** (point 10): the menu / pause check above now runs off Windows too.
 - **Licence and credit**: MIT (c) ThyHeroOfTime, `LICENSE-LA-Online` (shipped beside `LICENSE`), the
   README's online paragraph, and the log's `[fork]` line names it.
