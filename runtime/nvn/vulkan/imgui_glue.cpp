@@ -2,10 +2,24 @@
 // dynamic rendering begun by vk_frame_begin).
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
+#include <map>
+#include <vector>
 
 extern "C" {
 #include "vk.h"
 #include "record.h"
+}
+
+// Per ImGui context: the static images made for it (vk_imgui_texture_rgba), freed with its backend, and its backend's
+// generation - a new one each time the backend starts for that context, so code keeping a texture id made for it
+// (an overlay's icons, say) knows to make it again (vk_imgui_texture_generation).
+struct UiImage { VkImage image; VmaAllocation memory; VkImageView view; };
+struct UiContextImages { uint64_t generation = 0; std::vector<UiImage> images; };
+static std::map<ImGuiContext *, UiContextImages> g_ui_images;
+static uint64_t g_ui_generation;
+extern "C" uint64_t vk_imgui_texture_generation(void) {
+    auto it = g_ui_images.find(ImGui::GetCurrentContext());
+    return it == g_ui_images.end() ? 0 : it->second.generation;
 }
 
 // imgui_impl_vulkan.cpp: fixed vertex input draws nothing on this driver while dynamic vertex input is enabled.
@@ -53,7 +67,7 @@ extern "C" bool vk_imgui_backend_init(void) {
     ii.Device = g_vk.dev;
     ii.QueueFamily = g_vk.qfam;
     ii.Queue = g_vk.queue;
-    ii.DescriptorPoolSize = 64;
+    ii.DescriptorPoolSize = 256;  // (one per texture: the fonts, the start screen's images, overlays' icons and images)
     ii.MinImageCount = 2;
     ii.ImageCount = (g_vk.sc_count > 3 ? g_vk.sc_count : 3) + 1;  // vertex buffers rotate per image: cover frames in flight
     ii.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
@@ -68,6 +82,7 @@ extern "C" bool vk_imgui_backend_init(void) {
     // its own, which its NewFrame would otherwise make at the first frame, while the recorder thread (record.c) may
     // be submitting. Here the recorder is drained first, so the queue is idle.
     if (ok) {
+        g_ui_images[ImGui::GetCurrentContext()].generation = ++g_ui_generation;
         rec_drain();
         ImGui_ImplVulkan_CreateFontsTexture();
     }
@@ -88,6 +103,14 @@ extern "C" void vk_imgui_backend_shutdown(void) {
     if (!ImGui::GetIO().BackendRendererUserData) return;
     rec_drain();  // (the queue is the recorder's: idle for the wait below)
     vkDeviceWaitIdle(g_vk.dev);
+    auto it = g_ui_images.find(ImGui::GetCurrentContext());
+    if (it != g_ui_images.end()) {  // (the queue is idle: no frame in flight still samples them)
+        for (const UiImage &u : it->second.images) {
+            vkDestroyImageView(g_vk.dev, u.view, NULL);
+            vmaDestroyImage(g_vk.vma, u.image, u.memory);
+        }
+        g_ui_images.erase(it);
+    }
     ImGui_ImplVulkan_Shutdown();
 }
 
@@ -121,6 +144,10 @@ extern "C" uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h) {
     vi.format = VK_FORMAT_R8G8B8A8_UNORM;
     vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     VkImageView view;
-    if (vkCreateImageView(g_vk.dev, &vi, NULL, &view) != VK_SUCCESS) return 0;
+    if (vkCreateImageView(g_vk.dev, &vi, NULL, &view) != VK_SUCCESS) {
+        vmaDestroyImage(g_vk.vma, img, mem);
+        return 0;
+    }
+    g_ui_images[ImGui::GetCurrentContext()].images.push_back({img, mem, view});
     return (uint64_t)ImGui_ImplVulkan_AddTexture(vk_default_sampler(true), view, VK_IMAGE_LAYOUT_GENERAL);
 }
