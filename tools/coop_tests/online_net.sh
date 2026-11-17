@@ -7,15 +7,17 @@
 # the copies reach each other either way. Prints PASS / FAIL for each check.
 cd "$(git rev-parse --show-toplevel)" || exit 1
 [ -f laonline.ini ] && { echo "a laonline.ini in the checkout would override the modes: move it away"; exit 1; }
-mkdir -p save/save_0 build/frames
-rm -f save/save_0/savedata*.bin save/save_0/screenshot*.bin; cp ${SEED:-build/save_seed}/* save/save_0/  # (once, for both)
+mkdir -p build/frames
 rm -rf logs dev-events-log.txt laonline-*.txt laonline-*.jsonl laonline-*.log
 TITLE=$(python -c "
 s=[f'{f}:L:10,{f}:R:10' for f in range(400, 1400, 90)] + [f'{f}:A:8' for f in range(1400, 1800, 100)]
 print(','.join(s))")
 run() {  # <id> <P1 walk> [env...]
     local id=$1 walk=$2; shift 2
-    tools/coop_tests/run_test.sh $id ${SECS:-100} LARECOMP_COOP=1 LARECOMP_COOP_LOG=1 LARECOMP_HIDDEN=1 \
+    # (each copy its own save folder, from the seed: two games writing one folder at once fail each other's saves -
+    # a sharing violation, and a game whose save fails stops - as two PCs never do)
+    rm -rf build/save_$id; mkdir -p build/save_$id/save_0; cp ${SEED:-build/save_seed}/* build/save_$id/save_0/
+    tools/coop_tests/run_test.sh $id ${SECS:-100} LARECOMP_SAVE_DIR=build/save_$id LARECOMP_COOP=1 LARECOMP_COOP_LOG=1 LARECOMP_HIDDEN=1 \
         "LARECOMP_INPUT=$TITLE,$walk" LARECOMP_INPUT_P2=9999:A:1 "$@" > /dev/null 2>&1
 }
 run online_host "2600:STICK_LEFT:150" LAONLINE_MODE=host LAONLINE_PORT=47621 &

@@ -40,9 +40,9 @@ typedef int sock_t;
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include "../laonline_build.h"  // (LAO_MOD_VERSION: sent in HELLO, as Player 1's connection sends it - the relay checks it)
 
 #define LOCAL_MAX 8  // (players 2..8: index 1..7, as coop.c's)
-#define LAO_MOD_VERSION_LOCAL "15.2"  // (runtime/laonline_build.h LAO_MOD_VERSION: the relay checks it)
 
 extern uint64_t coop_player(int i);
 extern uint32_t coop_joined(void);
@@ -160,7 +160,16 @@ typedef struct {
     uint8_t sent_hp, sent_max;
     uint32_t sent_rgb;
     uint64_t sent_sample;
+    char login[200];  // the session it joined (relay_login's key): another one, or none, closes it
 } Conn;
+
+// Player 1's relay login (laonline_relay_login) and a key for it: the relay, the lobby, the password and the name.
+// 0: online play isn't on through the relay.
+static int relay_login(char host[96], char port[16], char name[17], char lobby[33], char password[65], char *key, size_t cap) {
+    if (!laonline_relay_login(host, 96, port, 16, name, lobby, password)) { if (cap) key[0] = 0; return 0; }
+    snprintf(key, cap, "%s:%s %s %s %s", host, port, lobby, password, name);
+    return 1;
+}
 
 static int send_frame(sock_t s, const uint8_t *body, int n) {
     uint8_t f[600];
@@ -183,8 +192,8 @@ static void conn_close(Conn *k, int i) {
 }
 
 static int conn_open(Conn *k, int i, uint32_t rgb) {
-    char host[96], port[16], name[17], lobby[33], password[65];
-    if (!laonline_relay_login(host, sizeof host, port, sizeof port, name, lobby, password)) return 0;
+    char host[96], port[16], name[17], lobby[33], password[65], key[200];
+    if (!relay_login(host, port, name, lobby, password, key, sizeof key)) return 0;
     struct addrinfo hints, *res = NULL;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_INET, hints.ai_socktype = SOCK_STREAM;
@@ -215,10 +224,11 @@ static int conn_open(Conn *k, int i, uint32_t rgb) {
     l = strlen(lobby); b[n++] = (uint8_t)l; memcpy(b + n, lobby, l); n += (int)l;
     l = strlen(password); b[n++] = (uint8_t)l; memcpy(b + n, password, l); n += (int)l;
     memcpy(b + n, "LAOV", 4); n += 4;
-    l = strlen(LAO_MOD_VERSION_LOCAL); b[n++] = (uint8_t)l; memcpy(b + n, LAO_MOD_VERSION_LOCAL, l); n += (int)l;
+    l = strlen(LAO_MOD_VERSION); b[n++] = (uint8_t)l; memcpy(b + n, LAO_MOD_VERSION, l); n += (int)l;
     k->s = s;
     if (!send_frame(s, b, n)) { conn_close(k, i); return 0; }
     k->ping_at = ms_now(), k->sent_hp = k->sent_max = 0xff, k->sent_rgb = rgb;
+    snprintf(k->login, sizeof k->login, "%s", key);
     LOG("[laonline] local player %d: on the relay %s:%s as '%s' (lobby %s)\n", i + 1, host, port, me, lobby);
     return 1;
 }
@@ -269,13 +279,18 @@ static void *net_thread(void *arg) {
     for (;;) {
         plat_sleep_until_ns(plat_now_ns() + 50000000ull);
         uint64_t now = ms_now();
+        // (the session Player 1 is in now: a connection opened for another one - online play stopped, or another session
+        // picked on the Online page - leaves at once, and joins this one)
+        char host[96], port[16], name[17], lobby[33], password[65], login[200];
+        relay_login(host, port, name, lobby, password, login, sizeof login);
         for (int i = 1; i < LOCAL_MAX; i++) {
             Conn *k = &conn[i];
             Sample s;
             pthread_mutex_lock(&g_lock);
             s = g_s[i];
             pthread_mutex_unlock(&g_lock);
-            int wanted = s.in && s.sampled_at && now - s.sampled_at < 2000;
+            if (k->s != BAD_SOCK && strcmp(k->login, login)) conn_close(k, i);
+            int wanted = login[0] && s.in && s.sampled_at && now - s.sampled_at < 2000;
             if (!wanted) {
                 if (k->s != BAD_SOCK) conn_close(k, i);
                 continue;

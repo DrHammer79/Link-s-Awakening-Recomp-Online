@@ -118,7 +118,12 @@ static void set_open(bool open);
 // launcher.mm's.
 // (Cosmetics and Cheats left the Settings tabs for entries of their own: Cosmetics by Settings, Cheats by the Save
 // Editor - user 2026-11-11)
-enum { BAR_SETTINGS, BAR_COSMETICS, BAR_RANDO, BAR_WARP, BAR_EDITOR, BAR_CHEATS, BAR_RESET, BAR_QUIT, BAR_CLOSE, BAR_N };
+// (Online: LA-Online's sessions, runtime/ui/laonline_lobby.mm - an entry only while online play is set up: bar_shown)
+enum { BAR_SETTINGS, BAR_COSMETICS, BAR_RANDO, BAR_WARP, BAR_EDITOR, BAR_CHEATS, BAR_ONLINE, BAR_RESET, BAR_QUIT, BAR_CLOSE, BAR_N };
+extern "C" bool laonline_configured(void);           // hle/laonline.c
+extern "C" void laonline_lobby_draw(float scale);    // laonline_lobby.mm
+extern "C" void laonline_lobby_frame(void);
+static bool bar_shown(int e) { return e != BAR_ONLINE || laonline_configured(); }
 static std::atomic<int> g_page{-1};  // the entry whose page is open (-1: the bar alone)
 static int g_bar_cur;  // the bar's cursor (render thread)
 static void page_open(int page);
@@ -135,7 +140,7 @@ extern "C" void menu_test_open(void) {
     if (getenv("LARECOMP_MENU_BAR")) { g_bar_cur = atoi(getenv("LARECOMP_MENU_BAR")) % BAR_N; return; }
     int t = getenv("LARECOMP_MENU_TAB") ? atoi(getenv("LARECOMP_MENU_TAB")) : -1;
     int page = t == 4 ? BAR_WARP : t == 2 ? BAR_EDITOR : t == 3 ? BAR_RANDO : t == 5 ? BAR_CHEATS : t == 7 ? BAR_COSMETICS
-             : t == 9 ? BAR_QUIT : t == 10 ? BAR_RESET : BAR_SETTINGS;
+             : t == 9 ? BAR_QUIT : t == 10 ? BAR_RESET : t == 12 ? BAR_ONLINE : BAR_SETTINGS;
     page_open(page);
     if (t >= 0 && page == BAR_SETTINGS) { extern int g_tab_request_ext; g_tab_request_ext = t; }
     // (test) LARECOMP_PREVIEW=<row label>: that row's live preview opens straight away (its page: LARECOMP_MENU_TAB)
@@ -1537,6 +1542,11 @@ static void page_corner_icon(int tab, float scale) {
         for (int k = 0; k < 10; k += 2) gd->AddTriangleFilled(pt[(k + 9) % 10], pt[k], pt[k + 1], gc);
         ImVec2 mid[5] = {pt[1], pt[3], pt[5], pt[7], pt[9]};
         gd->AddConvexPolyFilled(mid, 5, gc);
+    } else if (tab == 12) {  // (Online: a globe)
+        float t = r * 0.16f;
+        gd->AddCircle(c, r * 0.9f, gc, 32, t);
+        gd->AddEllipse(c, ImVec2(r * 0.42f, r * 0.9f), gc, 0, 32, t);
+        gd->AddLine(ImVec2(c.x - r * 0.9f, c.y), ImVec2(c.x + r * 0.9f, c.y), gc, t);
     } else {
         float e = r * 0.92f;
         ImVec2 a(c.x - e, c.y - e), b(c.x + e, c.y + e);
@@ -1578,7 +1588,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float), int o
     if (prelaunch) tabs[ntabs++] = {LN("System"), -1, true};
     static const char *names[] = {LN("Video"), LN("Audio"), LN("Save Editor"), LN("Randomizer"), LN("Warp"),
                                   LN("Cheats"), LN("Gameplay"), LN("Cosmetics"), PLAT_TOUCH ? LN("Controller") : LN("Controls"), LN("Quit"),
-                                  LN("Touch"), LN("General")};
+                                  LN("Touch"), LN("General"), LN("Online")};  // (12 Online: the bar's own entry)
     // General, Controls, Video, Audio, Gameplay (ids stay: test hooks; General leads, after the start screen's System -
     // user 2026-11-11). Warp, Save Editor and Quit are the in-game menu bar's own entries (only usable in a save - user
     // 2026-11-03); the Randomizer is the bar's entry in game and its own row on the start screen (user 2026-11-09);
@@ -1775,6 +1785,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float), int o
         case 11: general_draw(scale); break;
         case 7: tab_cosmetics(); break;
         case 8: controls_tab_draw(scale); break;
+        case 12: laonline_lobby_draw(scale); break;
 #if PLAT_TOUCH
         case 10: touch_tab_draw(scale); break;
 #endif
@@ -1843,7 +1854,7 @@ bool menu_reset_corner(float bx, float scale, ImFont *font, ImFont *font_big, bo
 // the entry under it, a click opens it (the page is drawn from the next frame: the press that opened it isn't the
 // page's too).
 static const char *g_bar_names[BAR_N] = {LN("Settings"), LN("Cosmetics"), LN("Randomizer"), LN("Warp"), LN("Save Editor"),
-                                         LN("Cheats"), LN("Reset"), LN("Quit"), ""};
+                                         LN("Cheats"), LN("Online"), LN("Reset"), LN("Quit"), ""};
 // an entry's tab at x, y (w x ph), its name in the current font at size fs
 static void bar_entry(ImDrawList *dl, float x, float y, float w, float ph, float pad, float fs, bool sel, bool hot,
                       const char *name, float scale) {
@@ -1861,7 +1872,8 @@ static void bar_entry(ImDrawList *dl, float x, float y, float w, float ph, float
 // menu (launcher.mm menu_tip) shows what opens. In the current font, shrunk to fit.
 void menu_bar_picture(float width, float scale) {
     float fs = ImGui::GetFontSize(), natural = 0;
-    for (int e = 0; e < BAR_CLOSE; e++) natural += ImGui::CalcTextSize(L(g_bar_names[e])).x + (2 * 22 + 10) * scale;
+    for (int e = 0; e < BAR_CLOSE; e++)
+        if (bar_shown(e)) natural += ImGui::CalcTextSize(L(g_bar_names[e])).x + (2 * 22 + 10) * scale;
     natural += 2 * 30 * scale + fs + 20 * scale;  // (the frame's insets and the X)
     float k = fminf(1.0f, width / natural), s = scale * k, w = natural * k;
     fs *= k;
@@ -1873,6 +1885,7 @@ void menu_bar_picture(float width, float scale) {
     plastic_panel(dl, a, ImVec2(a.x + w, a.y + bh), s);
     float x = a.x + in, y = a.y + in;
     for (int e = 0; e < BAR_CLOSE; e++) {
+        if (!bar_shown(e)) continue;
         float ew = ImGui::CalcTextSize(L(g_bar_names[e])).x * k + 2 * pad;
         bar_entry(dl, x, y, ew, ph, pad, fs, e == BAR_SETTINGS, false, L(g_bar_names[e]), s);
         x += ew + gap;
@@ -1913,7 +1926,10 @@ static void bar_draw(ImGuiIO &io, float scale) {
                            ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
                    : pressed(ImGuiKey_GamepadDpadLeft, ImGuiKey_GamepadLStickLeft, ImGuiKey_LeftArrow) ||
                            ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1 : 0;
-        if (step) g_bar_cur = (g_bar_cur + step + BAR_N) % BAR_N, menu_sfx_play(MENU_SFX_CURSOR);
+        if (step) {
+            do g_bar_cur = (g_bar_cur + step + BAR_N) % BAR_N; while (!bar_shown(g_bar_cur));
+            menu_sfx_play(MENU_SFX_CURSOR);
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false) || ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
             ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) || ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
             if (g_bar_cur == BAR_CLOSE) set_open(false);
@@ -1928,16 +1944,19 @@ static void bar_draw(ImGuiIO &io, float scale) {
     float x = wp.x + in, y = wp.y + in, pad = 22 * scale, gap = 10 * scale;
     // too wide for the bar (eight entries: long names - Russian, German - on a phone's larger menu): tighter entries,
     // then the names a little smaller, as the Settings tabs do (tabs_body)
-    float text_w[BAR_CLOSE], names_w = 0, tfs = fs;
-    for (int k = 0; k < BAR_CLOSE; k++) names_w += text_w[k] = ImGui::CalcTextSize(L(g_bar_names[k])).x;
-    float room = ws.x - 2 * in - ph - gap * BAR_CLOSE;  // (the close X and the gaps)
-    if (names_w + 2 * pad * BAR_CLOSE > room) pad = fmaxf((room - names_w) / (2 * BAR_CLOSE), 8 * scale);
-    if (names_w + 2 * pad * BAR_CLOSE > room && names_w > 0) {
-        float k = fmaxf((room - 2 * pad * BAR_CLOSE) / names_w, 0.6f);
+    float text_w[BAR_CLOSE] = {}, names_w = 0, tfs = fs;
+    int shown = 0;  // (the entries on the bar: Online only while online play is set up)
+    for (int k = 0; k < BAR_CLOSE; k++)
+        if (bar_shown(k)) names_w += text_w[k] = ImGui::CalcTextSize(L(g_bar_names[k])).x, shown++;
+    float room = ws.x - 2 * in - ph - gap * shown;  // (the close X and the gaps)
+    if (names_w + 2 * pad * shown > room) pad = fmaxf((room - names_w) / (2 * shown), 8 * scale);
+    if (names_w + 2 * pad * shown > room && names_w > 0) {
+        float k = fmaxf((room - 2 * pad * shown) / names_w, 0.6f);
         tfs *= k;
         for (float &t : text_w) t *= k;
     }
     for (int k = 0; k < BAR_CLOSE; k++) {
+        if (!bar_shown(k)) continue;
         float tw = text_w[k], w = tw + 2 * pad;
         ImGui::SetCursorScreenPos(ImVec2(x, y));
         ImGui::PushID(k);
@@ -2170,6 +2189,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     const double tw = target_w, th = target_h;
 #endif
     notice_take();  // (a save failed: the menu opens with it)
+    laonline_lobby_frame();  // (online play's session: polled, and started when its host starts it - menu open or not)
     bool open = g_open.load();
     bool inv = !open && inventory_overlay_wanted();
     bool trk = !open && tracker_overlay_wanted();
@@ -2384,8 +2404,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
             // back to the bar). ("Title screen" - rt_request_reboot(RT_REBOOT_TITLE) - is to find a new home; user
             // 2026-10-11.)
             static const char *titles[] = {LN("Settings"), LN("Cosmetics"), LN("Randomizer"), LN("Warp"), LN("Save Editor"),
-                                           LN("Cheats")};
-            static const int only[] = {-1000, 7, 3, 4, 2, 5};  // (the pages' tab ids)
+                                           LN("Cheats"), LN("Online")};
+            static const int only[] = {-1000, 7, 3, 4, 2, 5, 12};  // (the pages' tab ids)
             bool pane_x = page == BAR_RANDO || page == BAR_WARP || page == BAR_EDITOR || page == BAR_COSMETICS ||
                           page == BAR_CHEATS;  // (touch: their X is in a pane, or on the page's first line: menu_page_head)
 #if PLAT_TOUCH

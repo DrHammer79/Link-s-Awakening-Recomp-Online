@@ -111,7 +111,11 @@ static struct {
     int mode, port, type;
     char name[17], peer[64];
     char server[96], lobby[33], password[33];
-} g_cfg = {M_OFF, 47621, 0x21E, "Player", "", "192.168.1.145:47620", "default", ""};
+} g_cfg = {M_OFF, 47621, 0x21E, "Player", "", "", "default", ""};
+// (LAS Recomp Co-Op's port: no relay unless laonline.ini names one - it was a LAN address of V15.2's own. A lobby
+// named in laonline.ini / LAONLINE_LOBBY is joined at the first game frame; without one, the menu's Online page picks
+// the session: launch_from_config, runtime/ui/laonline_lobby.mm)
+static int g_lobby_named;
 // V10 launch room credentials are ephemeral; never overwrite a player's config.
 static pthread_mutex_t room_lock=PTHREAD_MUTEX_INITIALIZER;
 static char room_name[17],room_lobby[33],room_password[65];static int room_valid;
@@ -136,7 +140,7 @@ static void set_kv(const char *k, const char *v) {
     if (!strcmp(k, "puppet_look")) { g_look_link = strcmp(v, "shadow") != 0; return; }
     if (!strcmp(k, "mode")) g_cfg.mode = !strcmp(v, "echo") ? M_ECHO : !strcmp(v, "host") ? M_HOST : !strcmp(v, "join") ? M_JOIN : !strcmp(v, "server") ? M_SERVER : M_OFF;
     else if (!strcmp(k, "server")) snprintf(g_cfg.server, sizeof g_cfg.server, "%s", v);
-    else if (!strcmp(k, "lobby")) snprintf(g_cfg.lobby, sizeof g_cfg.lobby, "%s", v);
+    else if (!strcmp(k, "lobby")) snprintf(g_cfg.lobby, sizeof g_cfg.lobby, "%s", v), g_lobby_named = 1;
     else if (!strcmp(k, "password")) snprintf(g_cfg.password, sizeof g_cfg.password, "%s", v);
     else if (!strcmp(k, "name")) snprintf(g_cfg.name, sizeof g_cfg.name, "%s", v);
     else if (!strcmp(k, "port")) g_cfg.port = atoi(v);
@@ -167,6 +171,14 @@ static void load_config(void) {
     // laonline.ini; tools/coop_tests/online_relay.sh)
     if (ENV("LAONLINE_SERVER")) set_kv("server", ENV("LAONLINE_SERVER"));
     if (ENV("LAONLINE_NAME")) set_kv("name", ENV("LAONLINE_NAME"));
+    if (ENV("LAONLINE_LOBBY")) set_kv("lobby", ENV("LAONLINE_LOBBY"));
+}
+
+// (LAS Recomp Co-Op's port) the name and relay the menu's Online page starts from: laonline.ini's, or the environment's
+// (read at boot by laonline_configured, before the other threads start: not read again here, under the network thread)
+void laonline_lobby_config(char *name, size_t name_cap, char *server, size_t server_cap) {
+    snprintf(name, name_cap, "%s", g_cfg.name);
+    snprintf(server, server_cap, "%s", g_cfg.server);
 }
 
 // ---------------------------------------------------------------- network (non-blocking UDP, polled on the game thread)
@@ -1409,18 +1421,21 @@ static void publish_roster(const LaoSession *session,const LaoState *state,int h
 extern bool laonline_ui_paused(void);
 /* LAS Recomp's start screen has no online choice (LA-Online's own start screen isn't part of this build): a mode set in
  * laonline.ini or LAONLINE_MODE starts online play as the game does - co-op, or co-op randomizer while a seed is played
- * - as choosing it there would (laonline_launch_mode). Once, at the first game frame. */
+ * - as choosing it there would (laonline_launch_mode). Once, at the first game frame. The relay (server) only with a
+ * lobby named there too: otherwise the session is the one picked on the menu's Online page (runtime/ui/laonline_lobby.mm,
+ * his start screen's Play Co-Op), and configuration alone never starts it - as in his build. */
 static void launch_from_config(void) {
     static int done;
     if (done || atomic_load(&g_launch_online)) return;
     done = 1;
     load_config();
-    if (g_cfg.mode == M_OFF) return;
+    if (g_cfg.mode == M_OFF || (g_cfg.mode == M_SERVER && !g_lobby_named)) return;
     extern const char *rando_seed_dir(void);
     laonline_launch_mode(rando_seed_dir() ? 2 : 1);
 }
 
-// Online play set up at all: laonline.ini or LAONLINE_MODE sets a mode (the config launch_from_config reads). The rest
+// Online play set up at all: laonline.ini or LAONLINE_MODE sets a mode (the config launch_from_config reads), or
+// laonline.ini names a relay (server: the menu's Online page then picks the session - LA-Online's installer writes it). The rest
 // of the game calls into online play only behind this (main.c, warp.c, input.c, bindings.c, souls.c, miniboss.c,
 // hooks.c, movie.c, fs.c), so without it the game runs as it does without online play: no journal file, no
 // Z-targeting, F6 to F8 free to bind (LAS Recomp's review, point 4: play with the feature off stays identical). Worked
@@ -1432,7 +1447,7 @@ bool laonline_configured(void) {
     static int known = -1;
     if (known < 0) {
         load_config();
-        known = g_cfg.mode != M_OFF;
+        known = g_cfg.mode != M_OFF || g_cfg.server[0];
         g_laonline_on = known;
     }
     return known;

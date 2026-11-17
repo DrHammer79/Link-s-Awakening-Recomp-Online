@@ -10,7 +10,7 @@ the client sends and accepts, or inferred from it, and marked so:
 - **[inferred]** the only or most likely server behaviour that fits the client; a stand-in has to choose.
 
 File references are to `runtime/hle/` unless a path is given (`laonline.c:1103` =
-`runtime/hle/laonline.c` line 1103), branch `feature/online-coop`, LA-Online core V15.2
+`runtime/hle/laonline.c` line 1103; lines as of the port's first version - they move as the code does), LA-Online core V15.2
 (`runtime/laonline_build.h:5`, `LAO_MOD_VERSION "15.2"`). Only the relay mode (`mode = server`,
 `M_SERVER`) is covered; the direct `host` / `join` / `echo` modes send a 112-byte `LaoState` UDP
 datagram (`laonline.c:95-106`) and never meet the relay.
@@ -323,6 +323,39 @@ Replies the client accepts (`laonline.c:1038-1049`), first frame only, body 3..5
 - register (1/4): `99, 01, u8 n (<= 95), n bytes seed_id`, exact. Anything else = "Seed registration was refused".
 - describe (2): `9A, 01, digest (32), u8 n (<= 95), seed_id, u8 total, u8 ready`, exact.
 - describe (3): `9C, 01, digest (32), u8 n, seed_id, u8 total, u8 ready, u8 m (<= 90), m bytes display name`, exact.
+
+## 6a. Session service (0x30) [code]
+
+The rooms the menu's Online page hosts, lists and joins (`runtime/ui/laonline_lobby.mm`, from V15.2's
+`runtime/ui/session_ui.mm`). Like section 6: a short separate TCP connection (3 s connect / send / receive), one
+frame each way (`u16 length, 30, request`), the answer's opcode `B0`, then closed. A room's players then connect
+as in section 2 with the lobby and password the answer gives (HELLO; a Co-op Randomizer room's lobby ends in
+`.rando`, which the client strips and `laonline_relay_login` adds back for launch mode 2).
+
+Request: `01, u8 action, str code, str token, str name, str build (LAO_ROOM_BUILD), u8 mode (1 co-op, 2 co-op
+randomizer), str world (the seed's world checksum, hex), str seed (its ID), str title, str description, u8 ready,
+u8 r, g, b (tunic), u8 r, g, b (hair), str search, u8 filter mode (0 all, 1, 2), u8 sort (0 most players, 1 fewest,
+2 newest, 3 title), u16 page`. Strings are `u8 length` + bytes.
+
+| Action | Meaning |
+|---|---|
+| 0 | list public rooms (8 a page, the request's filter / sort / search on the host's name) |
+| 1 / 2 | host a private / public room (the request's mode, world, seed, title) |
+| 3 | join the room `code` (the rejoin token from `laonline-rejoin.txt` when the token is empty: a player whose game closed takes their place back) |
+| 4 | poll this player's room (every 2 s) |
+| 5 | ready (the request's `ready`) |
+| 6 | start (host only) |
+| 7 | leave |
+| 8 | a new code (host, before anyone joins) |
+| 9 | rename (the request's name) |
+
+Answer: `u8 ok, str message`; when ok also `str token (32 hex), str password, str lobby, u16 total, u16 page,
+u8 count (<= 8)`, then each room: `str code, str title, str description, str host, u8 mode, u8 public, u8 started,
+u8 capacity (4), str build, str world, str seed, u8 players (<= 4)`, each `str name, u8 r, g, b, u8 r, g, b, u8 ready,
+u8 host`. The frame ends exactly there. Action 0 answers with the page of rooms; the others with this player's
+room. The client joins only rooms of its own build; a started room is joined straight away (V13 join-in-progress).
+[inferred] (the stand-in, `tools/laonline_relay.py`): 4 places, a name already in the room gets " 2", the host
+leaving hands the room to the next player, an empty room is gone; lobby `room-<code>`, a random password.
 
 ## 7. Server behaviour the client expects
 

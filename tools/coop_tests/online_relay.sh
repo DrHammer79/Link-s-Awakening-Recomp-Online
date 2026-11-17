@@ -12,8 +12,7 @@
 cd "$(git rev-parse --show-toplevel)" || exit 1
 [ -f laonline.ini ] && { echo "a laonline.ini in the checkout would override the modes: move it away"; exit 1; }
 PORT=${PORT:-47630}
-mkdir -p save/save_0 build/frames
-rm -f save/save_0/savedata*.bin save/save_0/screenshot*.bin; cp ${SEED:-build/save_seed}/* save/save_0/  # (once, for both)
+mkdir -p build/frames
 rm -rf logs dev-events-log.txt laonline-*.txt laonline-*.jsonl laonline-*.log
 python -u tools/laonline_relay.py $PORT > build/relay.log 2>&1 &
 RELAY=$!
@@ -23,8 +22,11 @@ s=[f'{f}:L:10,{f}:R:10' for f in range(400, 1400, 90)] + [f'{f}:A:8' for f in ra
 print(','.join(s))")
 run() {  # <id> <name> <local players> <P1 walk> [env...]
     local id=$1 name=$2 n=$3 walk=$4; shift 4
-    tools/coop_tests/run_test.sh $id ${SECS:-110} LARECOMP_COOP=$n LARECOMP_COOP_LOG=1 LARECOMP_HIDDEN=1 \
-        "LARECOMP_INPUT=$TITLE,$walk" LARECOMP_INPUT_P2=9999:A:1 LAONLINE_MODE=server \
+    # (each copy its own save folder, from the seed: two games writing one folder at once fail each other's saves -
+    # a sharing violation, and a game whose save fails stops - as two PCs never do)
+    rm -rf build/save_$id; mkdir -p build/save_$id/save_0; cp ${SEED:-build/save_seed}/* build/save_$id/save_0/
+    tools/coop_tests/run_test.sh $id ${SECS:-110} LARECOMP_SAVE_DIR=build/save_$id LARECOMP_COOP=$n LARECOMP_COOP_LOG=1 LARECOMP_HIDDEN=1 \
+        "LARECOMP_INPUT=$TITLE,$walk" LARECOMP_INPUT_P2=9999:A:1 LAONLINE_MODE=server LAONLINE_LOBBY=default \
         LAONLINE_SERVER=127.0.0.1:$PORT LAONLINE_NAME=$name "$@" > /dev/null 2>&1
 }
 run online_alice Alice 2 "2700:STICK_LEFT:150" LARECOMP_GIVE_ITEM=2500:7:1:-1,2500:4:5:-1,2500:116:1:-1 &
@@ -38,12 +40,15 @@ check "relay: Alice and Bob joined" 'grep -q "join .* Alice" build/relay.log && 
 check "Alice sees Bob's Link" 'grep -qF "[laonline] remote Link '"'"'Bob'"'"' spawned" build/run_online_alice.log'
 check "Bob sees Alice's Link" 'grep -qF "[laonline] remote Link '"'"'Alice'"'"' spawned" build/run_online_bob.log'
 check "Alice's bombs reported as her pickup" 'grep -q "pickup 4 x5 .* from 0" build/relay.log'
-check "the Boomerang shared as progress (key 0x7105)" 'grep -q "item 0x7105 = 1 from 0" build/relay.log'
+# (shared progress mirrors what each player holds - any player holding the item sends its key, and the relay keeps the
+# highest: Bob, given the Boomerang by Alice's reward before her key reached him, sends it too; it credits no one)
+check "the Boomerang shared as progress (key 0x7105)" 'grep -q "item 0x7105 = 1 from [01]" build/relay.log'
 check "Bob got the bombs through AddItem" 'grep -qF "[laonline] team grant: item 4 x5" build/run_online_bob.log'
 check "Bob has the Boomerang (a reward: AddItem)"     'grep -oE "progression.audit .*local_items=[0-9a-f]+" build/run_online_bob.log | tail -1 | grep -qE "local_items=[0-9a-f]*[2367abef][0-9a-f]$"'
 check "the Sensor shared as progress (key 0x7130)" 'grep -q "item 0x7130 = 1 from 0" build/relay.log'
 check "Bob got the Sensor through AddItem" 'grep -qF "[laonline] team grant: item 116 x1" build/run_online_bob.log'
-check "nothing reported back from Bob" '! grep -qE "(pickup 4|pickup 7|item 0x7105).* from 1" build/relay.log'
+# (what names a finder - a pickup, a reward receipt - never comes back from the player it was given to)
+check "nothing reported back from Bob as his find" '! grep -qE "^(pickup|reward) .* from 1" build/relay.log'
 check "Alice's Player 2 on the relay as a player of his own" 'grep -q "join .* Alice P2" build/relay.log'
 check "Bob sees Alice's Player 2" 'grep -qF "[laonline] remote Link '"'"'Alice P2'"'"' spawned" build/run_online_bob.log'
 check "Alice doesn't see her own Player 2 as remote" '! grep -qF "remote Link '"'"'Alice P2'"'"'" build/run_online_alice.log'

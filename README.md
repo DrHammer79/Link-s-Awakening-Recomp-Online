@@ -1,8 +1,10 @@
 # LAS Recomp
 
 > [!TIP]
-> **This is a fork of [peiikai/LASRecomp](https://github.com/peiikai/LASRecomp) with local co-op for 2 to 8 players
-> added**, one controller each. What it adds, how to play it and where to report its bugs:
+> **LA-Online with local co-op.** This is [LA-Online](https://github.com/LegendarySavageGamer/Link-s-Awakening-Recomp-Online)
+> (online play: players on other PCs in your game) on [peiikai/LASRecomp](https://github.com/peiikai/LASRecomp), together
+> with drop-in local co-op for 2 to 8 players on each PC, one controller each. Every local player goes online as a player
+> of their own. How to play online: [Online play](#online-play-la-online); local co-op:
 > [This fork: local co-op](#this-fork-local-co-op).
 
 > [!IMPORTANT]
@@ -83,23 +85,33 @@ co-op branch is kept on top of it. It calls itself LAS Recomp Co-Op (0.1.0): the
 
 [docs/coop.md](docs/coop.md) explains every setting in more detail and how co-op works inside the game.
 
-**Playing online:** the co-op is local - every player's controller on the PC running the game. Friends elsewhere can
-join it through a game-streaming service that passes their controllers through as pads on that PC, such as Parsec:
-they see the host's screen and play on their own Link. Each friend's controller counts as one of the host's
-(on Windows, 4 Xbox-type controllers at most). Lag is the stream's.
+### Online play (LA-Online)
 
-**Online play (LA-Online, experimental):** this build also carries the online core of
 [LA-Online](https://github.com/LegendarySavageGamer/Link-s-Awakening-Recomp-Online) by LegendarySavageGamer
-(ThyHeroOfTime), from its V15.2, moved to game 1.0.1: players on other PCs appear in your game as their own Links,
-with shared story progress and items, chat, PvP and Z-targeting. Thank you for it. It is off unless a `laonline.ini`
-in the data folder sets a mode; without one the game runs as if it weren't there. Only each PC's Player 1 is sent to
-the others for now. What came over and what changed: [docs/laonline-port.md](docs/laonline-port.md). Report its bugs
-here too, saying it was online.
+(ThyHeroOfTime): players on other PCs appear in your game as their own Links, with shared story progress and items,
+chat, PvP and Z-targeting. Thank you for it. Here it runs on game 1.0.0 and 1.0.1, beside local co-op.
 
-**Bugs:** co-op isn't part of upstream, so report co-op bugs on
-[this fork's Issues](https://github.com/DrHammer79/LASRecomp/issues), not peiikai's. Say how many players, where in the
-game and what happened, and attach `lasrecomp.log` from the data folder (where it is: under Building from source).
-The scripted runs co-op was checked with are in [tools/coop_tests](tools/coop_tests/README.md).
+- **Set up:** a `laonline.ini` in the data folder naming LA-Online's relay: `server = <address>:<port>`, and
+  `name = <your name>` (LA-Online's installer writes it). Without one, nothing of online play runs: the game is as if
+  it weren't there.
+- **Play:** the menu (F1, or Minus + Plus) has an **Online** page. Host a private session (a room code to give your
+  friends) or a public one, or join one by its code or from the list of public sessions. Everyone presses Ready and
+  the host starts it. While a randomizer seed is played, the session is a Co-op Randomizer one on that seed (the others
+  play the same seed). Leaving the session on the page ends online play.
+- **Several players on one PC:** each local co-op player goes online as a player of their own ("Name P2", ...), with
+  their own Link, hearts and colour. Progress, items and the save stay one per PC.
+- What came over from LA-Online V15.2 and what changed: [docs/laonline-port.md](docs/laonline-port.md); the relay
+  protocol the game speaks: [docs/laonline-protocol.md](docs/laonline-protocol.md).
+
+**Playing with friends without LA-Online:** the co-op is local - every player's controller on the PC running the game.
+Friends elsewhere can also join it through a game-streaming service that passes their controllers through as pads on
+that PC, such as Parsec: they see the host's screen and play on their own Link (on Windows, 4 Xbox-type controllers at
+most). Lag is the stream's.
+
+**Bugs:** online play and co-op aren't part of upstream, so report their bugs in
+[this repository's Issues](../../issues), not peiikai's. Say how many players, online or not, where in the game and what
+happened, and attach `lasrecomp.log` from the data folder (where it is: under Building from source). The scripted runs
+they were checked with are in [tools/coop_tests](tools/coop_tests/README.md).
 
 ## System requirements
 

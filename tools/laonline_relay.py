@@ -13,6 +13,7 @@ stdout ("join", "leave", "flag", "item", "pickup", "reward", ...), which the tes
 library only. Ctrl+C stops it.
 """
 import asyncio
+import secrets
 import struct
 import sys
 
@@ -226,6 +227,170 @@ def handle(p, b):
         log(f'ignored type {t:#x} from {p.id}')
 
 
+# ---------------------------------------------------------------- the session service (opcode 0x30): the rooms the
+# menu's Online page hosts, lists and joins (runtime/ui/laonline_lobby.mm; LA-Online V15.2's session_ui.mm). One request
+# per connection, answered with opcode 0xB0. A room's members then meet in its relay lobby ("room-<code>", ".rando" for
+# a Co-op Randomizer room) with its password. Its rules where the real relay's aren't known: 4 places; a name already
+# in the room gets " 2"; the host leaving hands the room to the next member; an empty room is gone.
+class Member:
+    def __init__(self, token, name, rgb, hair):
+        self.token, self.name, self.rgb, self.hair, self.ready, self.host = token, name, rgb, hair, False, False
+
+
+class Room:
+    serial = 0
+
+    def __init__(self, code, title, host, mode, public, build, world, seed):
+        Room.serial += 1
+        self.code, self.title, self.mode, self.public, self.build = code, title, mode, public, build
+        self.world, self.seed, self.started, self.members, self.created = world, seed, False, [], Room.serial
+        self.password = secrets.token_hex(8).encode()
+        self.host = host
+
+    def lobby(self):
+        return b'room-' + self.code + (b'.rando' if self.mode == 2 else b'')
+
+    def wire(self):
+        b = put_str(self.code) + put_str(self.title) + put_str(b'') + put_str(self.host)
+        b += bytes([self.mode, int(self.public), int(self.started), 4]) + put_str(self.build) + put_str(self.world)
+        b += put_str(self.seed) + bytes([len(self.members)])
+        for m in self.members:
+            b += put_str(m.name) + m.rgb + m.hair + bytes([int(m.ready), int(m.host)])
+        return b
+
+
+rooms = {}  # code -> Room
+CODE_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+
+
+def session(b):
+    o = 2  # (version 1, action)
+    action = b[1]
+
+    def s():
+        nonlocal o
+        n = b[o]; v = bytes(b[o + 1:o + 1 + n]); o += 1 + n
+        return v
+    code, token, name, build = s(), s(), s(), s()
+    mode = b[o]; o += 1
+    world, seed, title, _description = s(), s(), s(), s()
+    ready = b[o] != 0; rgb = bytes(b[o + 1:o + 4]); hair = bytes(b[o + 4:o + 7]); o += 7
+    search = s()
+    filt, sort = b[o], b[o + 1]
+    (page,) = struct.unpack_from('<H', b, o + 2)
+    name = name[:16] or b'Player'
+
+    def fail(msg):
+        return bytes([0]) + put_str(msg.encode())
+
+    def ok(msg, tok=b'', room=None, listed=None, total=0, pg=0):
+        out = bytes([1]) + put_str(msg.encode()) + put_str(tok)
+        out += put_str(room.password if room else b'') + put_str(room.lobby() if room else b'')
+        shown = listed if listed is not None else ([room] if room else [])
+        out += struct.pack('<HH', total, pg) + bytes([len(shown)])
+        return out + b''.join(r.wire() for r in shown)
+
+    def member_of(tok):
+        for r in rooms.values():
+            for m in r.members:
+                if tok and m.token == tok:
+                    return r, m
+        return None, None
+
+    def drop(r, m):
+        r.members.remove(m)
+        log(f'session leave {r.code.decode()} {m.name.decode(errors="replace")}')
+        if not r.members:
+            del rooms[r.code]
+        elif m.host:
+            r.members[0].host = True
+            r.host = r.members[0].name
+
+    def unique(r, n):
+        names = {m.name for m in r.members}
+        k, base = 2, n
+        while n in names:
+            n = base[:14] + b' ' + str(k).encode(); k += 1
+        return n
+
+    def new_code():
+        while True:
+            c = ''.join(secrets.choice(CODE_LETTERS) for _ in range(6)).encode()
+            if c not in rooms:
+                return c
+
+    if action == 0:
+        listed = [r for r in rooms.values() if r.public and r.build == build and (filt == 0 or r.mode == filt)
+                  and search.lower() in r.host.lower()]
+        keys = [lambda r: -len(r.members), lambda r: len(r.members), lambda r: -r.created, lambda r: r.title.lower()]
+        listed.sort(key=keys[sort if sort < 4 else 0])
+        return ok('', listed=listed[page * 8:page * 8 + 8], total=len(listed), pg=page)
+    if action in (1, 2):
+        r, m = member_of(token)
+        if r:
+            drop(r, m)
+        r = Room(new_code(), title or name + b"'s session", name, 2 if mode == 2 else 1, action == 2, build, world, seed)
+        m = Member(secrets.token_hex(16).encode(), name, rgb, hair)
+        m.host = True
+        r.members.append(m)
+        rooms[r.code] = r
+        log(f'session host {r.code.decode()} by {name.decode(errors="replace")} '
+            f'({"public" if r.public else "private"}, {"co-op randomizer" if r.mode == 2 else "co-op"})')
+        return ok('Session created.', m.token, r)
+    if action == 3:
+        r = rooms.get(code.upper())
+        if not r:
+            return fail('No session with that code.')
+        if r.build != build:
+            return fail(f'This session needs LA-Online {r.build.decode(errors="replace")}.')
+        old, m = member_of(token)
+        if old is r:
+            return ok('Welcome back.', m.token, r)
+        if old:
+            drop(old, m)
+        if len(r.members) >= 4:
+            return fail('This session is full.')
+        m = Member(secrets.token_hex(16).encode(), unique(r, name), rgb, hair)
+        r.members.append(m)
+        log(f'session join {r.code.decode()} {m.name.decode(errors="replace")} ({len(r.members)} in)')
+        return ok('Joined the session.', m.token, r)
+    r, m = member_of(token)
+    if not r or r.code != code:
+        return fail('You are no longer in this session.')
+    if action == 4:
+        return ok('', m.token, r)
+    if action == 5:
+        m.ready = ready
+        log(f'session ready {r.code.decode()} {m.name.decode(errors="replace")} {int(ready)}')
+        return ok('', m.token, r)
+    if action == 6:
+        if not m.host:
+            return fail('Only the host can start the session.')
+        if len(r.members) < 2 or not all(x.ready for x in r.members):
+            return fail('Every player must be ready.')
+        r.started = True
+        log(f'session start {r.code.decode()} lobby {r.lobby().decode()} ({len(r.members)} players)')
+        return ok('Session started.', m.token, r)
+    if action == 7:
+        drop(r, m)
+        return ok('Left the session.')
+    if action == 8:
+        if not m.host or len(r.members) != 1 or r.started:
+            return fail('A new code only before anyone joins.')
+        del rooms[r.code]
+        r.code = new_code()
+        rooms[r.code] = r
+        return ok('New room code.', m.token, r)
+    if action == 9:
+        r.members.remove(m)
+        m.name = unique(r, name)
+        r.members.append(m)
+        if m.host:
+            r.host = m.name
+        return ok('Name changed.', m.token, r)
+    return fail('Unknown request.')
+
+
 async def client(reader, writer):
     p = Player(writer)
     try:
@@ -235,6 +400,11 @@ async def client(reader, writer):
             if n == 0:
                 continue
             b = await reader.readexactly(n)
+            if p.lobby is None and b[0] == 0x30:  # (the session service: one answer, then the connection closes)
+                body = bytes([0xB0]) + session(b[1:])
+                writer.write(frame(body))
+                await writer.drain()
+                break
             if p.lobby is None and b[0] in (0x01, 0x31):
                 if not hello(p, b[0], b):
                     break
