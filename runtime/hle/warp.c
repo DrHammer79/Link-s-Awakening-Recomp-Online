@@ -789,11 +789,12 @@ void give_item_tick(Cpu *c, uint64_t frame) {
     if (laonline_configured()) {  // online play (laonline.ini / LAONLINE_MODE sets a mode): its UI state, the remote
                                   // players' Links, Z-targeting, the team's pickups (runtime/hle/laonline*.c, ztarget.c)
         extern void laonline_ui_tick(uint64_t), laonline_tick(Cpu *, uint64_t), ztarget_tick(Cpu *, uint64_t),
-            laonline_coop_tick(Cpu *, uint64_t);
+            laonline_coop_tick(Cpu *, uint64_t), laonline_local_tick(Cpu *, uint64_t);
         laonline_ui_tick(frame);
         laonline_tick(c, frame);
         ztarget_tick(c, frame);
         laonline_coop_tick(c, frame);
+        laonline_local_tick(c, frame);  // (this PC's other local co-op players on the relay too: laonline_local.c)
     }
     { extern void escape_tick(Cpu *, uint64_t); escape_tick(c, frame); }
     { extern void hint_sheet_tick(Cpu *, uint64_t); hint_sheet_tick(c, frame); }  // (runtime/hle/hint_sheet.c)

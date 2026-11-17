@@ -57,5 +57,6 @@ empty, so the defaults, when missing). They play in the checkout: its own `save/
 | `likelike.sh` | a Like Like catching Player 2 |
 | `armos.sh`, `armos_fight.sh` | the Armos Knight's target, traced |
 | `grave.sh`, `zol.sh`, `zolhit.sh`, `revive_zol.sh` | the ghost's grave's event, Red Zols' targets and hits (need the saves above) |
+| `online_relay.sh` | online play through a relay (`tools/laonline_relay.py`, a stand-in for LA-Online's): two copies, one with 2 local players; joins, each other's Links, a pickup and shared progress granted through the game's AddItem, the local Player 2 on the relay as a player of his own; PASS / FAIL each |
 | `online_net.sh` | online play between two copies of the game on this PC (direct host / join over UDP on 127.0.0.1): each sees the other connect and his Link appear; PASS / FAIL each |
 | `online.sh` | online play (LA-Online) on one PC: set up nowhere it leaves no trace (no online log lines, no journal files); in echo mode a puppet spawns, alone and beside 2 local players; PASS / FAIL each |

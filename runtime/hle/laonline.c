@@ -163,6 +163,10 @@ static void load_config(void) {
     if (ENV("LAONLINE_MODE")) set_kv("mode", ENV("LAONLINE_MODE"));
     if (ENV("LAONLINE_PEER")) set_kv("peer", ENV("LAONLINE_PEER"));
     if (ENV("LAONLINE_PORT")) set_kv("port", ENV("LAONLINE_PORT"));
+    // (LAS Recomp Co-Op's port: the relay's address and the name too - two copies on one PC share the data root's
+    // laonline.ini; tools/coop_tests/online_relay.sh)
+    if (ENV("LAONLINE_SERVER")) set_kv("server", ENV("LAONLINE_SERVER"));
+    if (ENV("LAONLINE_NAME")) set_kv("name", ENV("LAONLINE_NAME"));
 }
 
 // ---------------------------------------------------------------- network (non-blocking UDP, polled on the game thread)
@@ -346,7 +350,12 @@ static uint64_t g_local_anim_at;
 void laonline_native_animation(Cpu *c) {
     if (!g_ga || c->x[2] != 0 || c->x[1] > 0xffffu) return;
     uint64_t mgr = LD64(GA(GAME_MGR)), link = mgr ? LD64(mgr + 0x4b8) : 0;
-    if (!link || LD64(link + LAO_LOCAL_ANIMATION_OFF) != c->x[0]) return;
+    if (!link || LD64(link + LAO_LOCAL_ANIMATION_OFF) != c->x[0]) {
+        // (LAS Recomp Co-Op's port: or another local co-op player's Link - sent on his own connection, laonline_local.c)
+        extern void laonline_local_animation(uint64_t player, uint16_t anim);
+        laonline_local_animation(c->x[0], (uint16_t)c->x[1]);
+        return;
+    }
     g_local_anim = (uint16_t)c->x[1];
     g_local_anim_flags = (g_local_anim_flags ^ LAO_ANIMATION_EVENT) | LAO_ANIMATION_VALID;
     g_local_anim_at = plat_now_ns() / 1000000ull;
@@ -919,6 +928,10 @@ static int get_str(const uint8_t *b, int len, int *o, char *out, size_t cap) {
 
 static void srv_handle(const uint8_t *b, int len) {
     if (len <= 0) return;
+    // (LAS Recomp Co-Op's port: a message about one of this PC's other local players - on the relay as players of their
+    // own, laonline_local.c - is not about a remote player: no puppet, no name tag, no "joined")
+    extern int laonline_local_peer_message(const uint8_t *, int);
+    if (laonline_local_peer_message(b, len)) return;
     laonline_v12_message(b,(size_t)len);  /* V12 (before the Global filter: PvP frames are Global's) */
     if(atomic_load(&g_launch_online)==3 && b[0]!=0x81 && b[0]!=0x82 && b[0]!=0x83 && b[0]!=0x84 && b[0]!=0x89 && b[0]!=0x8a && b[0]!=0x8b && b[0]!=0x8c && b[0]!=0x8d && b[0]!=0x8f && b[0]!=LAO_CHAT_RECEIVE && b[0]!=LAO_TYPING_RECEIVE)return;
     pthread_mutex_lock(&g_srv_lock);
@@ -1059,6 +1072,23 @@ int laonline_seed_descriptor(char *id,size_t idcap,char *world,size_t worldcap,i
 
 int laonline_seed_metadata_named(const char *folder,const char *name,char *id,size_t idcap,char *error,size_t cap){char display[96];snprintf(display,sizeof display,"%s",name);return seed_metadata_request(folder,id,idcap,NULL,0,NULL,NULL,display,sizeof display,error,cap);}
 int laonline_seed_descriptor_named(char *id,size_t idcap,char *world,size_t worldcap,int *total,int *ready,char *display,size_t displaycap,char *error,size_t cap){return seed_metadata_request(NULL,id,idcap,world,worldcap,total,ready,display,displaycap,error,cap);}
+// LAS Recomp Co-Op's port: the relay login srv_thread uses - its address, name, lobby (the Randomizer's ".rando" one too)
+// and password - for this PC's other local players' own connections (laonline_local.c). 0 unless online play is
+// launched in relay mode (not Global).
+int laonline_relay_login(char *host, size_t hn, char *port, size_t pn, char *name, char *lobby, char *password) {
+    int launch = atomic_load(&g_launch_online);
+    if (g_cfg.mode != M_SERVER || launch < 1 || launch > 2) return 0;
+    snprintf(host, hn, "%s", g_cfg.server);
+    snprintf(port, pn, "47620");
+    char *colon = strrchr(host, ':');
+    if (colon) *colon = 0, snprintf(port, pn, "%s", colon + 1);
+    char login_lobby[33];
+    room_login(name, login_lobby, password);
+    if (launch == 2) snprintf(lobby, 33, "%.26s.rando", login_lobby);
+    else snprintf(lobby, 33, "%s", login_lobby);
+    return 1;
+}
+
 static void *srv_thread(void *arg) {
     (void)arg;
 #ifdef _WIN32
@@ -1271,6 +1301,12 @@ static void *srv_thread(void *arg) {
                 if (fl == 0) { g_srv_status = 2; break; }
                 if (have - o - 2 < fl) break;
                 srv_handle(rb + o + 2, fl);
+                {   // (LAS Recomp Co-Op's port: this PC's other local players listed in a WELCOME: not remote players)
+                    extern void laonline_local_hide(LaoSession *);
+                    pthread_mutex_lock(&g_srv_lock);
+                    laonline_local_hide(&g_srv_session);
+                    pthread_mutex_unlock(&g_srv_lock);
+                }
                 o += 2 + fl;
             }
             memmove(rb, rb + o, (size_t)(have - o));
@@ -1465,6 +1501,7 @@ void laonline_tick(Cpu *c, uint64_t frame) {
     else laonline_death_context(0xffff,0xffff,0);
     static uint16_t diag_map=0xffff,diag_room=0xffff;
     uint16_t dm=lao_name_id(level),dr=lao_room_id(level,room);
+    { extern void laonline_local_context(uint16_t, uint16_t); laonline_local_context(dm, dr); }  /* (LAS Recomp Co-Op) */
     if(dm!=diag_map || dr!=diag_room){laonline_diag("scene.enter",dm,dr,0,0,1);diag_map=dm;diag_room=dr;}
 
     bool have_me = pc != 0;

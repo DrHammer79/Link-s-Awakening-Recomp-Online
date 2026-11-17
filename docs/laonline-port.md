@@ -71,6 +71,17 @@ your own path 1.5 s late), `host` / `join` (two PCs, direct), `server` (his rela
 - `keysanity.c` `rt_add_item`: his observer (as V15.2 has it): the item a pickup adds, reported to the team
   (`laonline_coop_pickup`) and checked by the journal - missing from the first port, so this PC's
   pickups weren't shared. Behind `laonline_configured`.
+- `laonline.c`: `LAONLINE_SERVER` and `LAONLINE_NAME` override the ini's, as `LAONLINE_MODE` / `PEER` /
+  `PORT` do (two copies on one PC share the data root's `laonline.ini`).
+- Players 2..8 of this PC (local co-op) on the relay as players of their own:
+  `runtime/hle/laonline_local.c` (ours). His protocol has one player per relay connection, so each
+  local player in the game gets a connection of his own (name "<Player 1's> P<n>", his colour, his
+  Link's position, facing, animation and hearts); nothing else goes out on it (progress, pickups,
+  deaths, chat, PvP stay Player 1's: one save per PC). No change to the protocol or the relay.
+  In `laonline.c`: `laonline_relay_login` (the login the main connection uses), the main connection
+  leaving these ids out (`laonline_local_peer_message` in `srv_handle`, `laonline_local_hide` after
+  each message), the animation hook recording the other local Links' too, the map / room passed on.
+  Relay mode only; direct host / join stays one player a side (its state packet has one).
 - `laonline_overlay.mm`: no update notice (his updater), no lobby seed keepalive (the lobby), the
   drawn circle for the death-notice portrait (his menu art).
 - Kept byte-identical for compatibility with his players: the seed-share strings
@@ -116,7 +127,7 @@ The rules the review set for this fork's co-op, checked for online play (2026-11
 - **Save safety** (point 2): shared items, levels, rupees, ammo and recovery hearts through the game's
   `AddItem` (above). Left: PvP damage writes Link's hearts (`pvp_set_hp`).
 
-Still open, his to decide (asked 2026-11-17):
-
-- **Several local players per PC**: each PC sends only its Player 1 (`GAME_MGR+0x4b8`); PvP and
-  Z-targeting act for him alone.
+Done here without him, to check with him (2026-11-17): the save-safe grants and local players on the relay
+above, tested against a stand-in relay (`tools/laonline_relay.py`, written from his client:
+`docs/laonline-protocol.md`) - not his relay, which isn't public. PvP and Z-targeting still act for
+Player 1 alone.
