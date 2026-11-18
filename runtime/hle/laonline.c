@@ -113,8 +113,9 @@ static struct {
     char server[96], lobby[33], password[33];
 } g_cfg = {M_OFF, 47621, 0x21E, "Player", "", "", "default", ""};
 // (LAS Recomp Co-Op's port: no relay unless laonline.ini names one - it was a LAN address of V15.2's own. A lobby
-// named in laonline.ini / LAONLINE_LOBBY is joined at the first game frame; without one, the menu's Online page picks
-// the session: launch_from_config, runtime/ui/laonline_lobby.mm)
+// named by LAONLINE_LOBBY is joined at the first game frame (tests, automation); otherwise the menu's Online page picks
+// the session: launch_from_config, runtime/ui/laonline_lobby.mm. laonline.ini's own lobby = doesn't start anything -
+// his installer writes one into every player's file, and his game never joined it by itself.)
 static int g_lobby_named;
 // V10 launch room credentials are ephemeral; never overwrite a player's config.
 static pthread_mutex_t room_lock=PTHREAD_MUTEX_INITIALIZER;
@@ -140,7 +141,7 @@ static void set_kv(const char *k, const char *v) {
     if (!strcmp(k, "puppet_look")) { g_look_link = strcmp(v, "shadow") != 0; return; }
     if (!strcmp(k, "mode")) g_cfg.mode = !strcmp(v, "echo") ? M_ECHO : !strcmp(v, "host") ? M_HOST : !strcmp(v, "join") ? M_JOIN : !strcmp(v, "server") ? M_SERVER : M_OFF;
     else if (!strcmp(k, "server")) snprintf(g_cfg.server, sizeof g_cfg.server, "%s", v);
-    else if (!strcmp(k, "lobby")) snprintf(g_cfg.lobby, sizeof g_cfg.lobby, "%s", v), g_lobby_named = 1;
+    else if (!strcmp(k, "lobby")) snprintf(g_cfg.lobby, sizeof g_cfg.lobby, "%s", v);
     else if (!strcmp(k, "password")) snprintf(g_cfg.password, sizeof g_cfg.password, "%s", v);
     else if (!strcmp(k, "name")) snprintf(g_cfg.name, sizeof g_cfg.name, "%s", v);
     else if (!strcmp(k, "port")) g_cfg.port = atoi(v);
@@ -171,7 +172,7 @@ static void load_config(void) {
     // laonline.ini; tools/coop_tests/online_relay.sh)
     if (ENV("LAONLINE_SERVER")) set_kv("server", ENV("LAONLINE_SERVER"));
     if (ENV("LAONLINE_NAME")) set_kv("name", ENV("LAONLINE_NAME"));
-    if (ENV("LAONLINE_LOBBY")) set_kv("lobby", ENV("LAONLINE_LOBBY"));
+    if (ENV("LAONLINE_LOBBY")) set_kv("lobby", ENV("LAONLINE_LOBBY")), g_lobby_named = 1;  // (joined at once: above)
 }
 
 // (LAS Recomp Co-Op's port) the name and relay the menu's Online page starts from: laonline.ini's, or the environment's

@@ -34,8 +34,8 @@ This fork adds local co-op: 2 to 8 Links on one PC, one controller each, after t
 [The Legend of Zelda: Link's Awakening Multiplayer](https://gamesdb.launchbox-app.com/games/details/422143-the-legend-of-zelda-links-awakening-multiplayer)
 by Estuko and Geek Joystick (its build LA_Coop_ExactStack_360), whose work this co-op is built on: thank you.
 Everything else is upstream's [peiikai/LASRecomp](https://github.com/peiikai/LASRecomp) `beta_6`, and this fork's
-co-op branch is kept on top of it. It calls itself LAS Recomp Co-Op (0.1.0): the `[fork]` line near the top of its
-`lasrecomp.log` says so.
+co-op branch is kept on top of it. This build calls itself LA-Online 16.0 with LAS Recomp Co-Op 0.1.0: the `[fork]`
+line near the top of its `lasrecomp.log` says so.
 
 **What it adds**
 - Each player has their own hearts (or one shared pool). A player out of hearts is knocked out until another player

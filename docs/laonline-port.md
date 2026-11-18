@@ -49,8 +49,9 @@ your own path 1.5 s late), `host` / `join` (two PCs, direct), `server` (his rela
   `rt_hook` checked a raw address on 1.0.0).
 - `laonline.c`: `launch_from_config` (a mode in `laonline.ini` / `LAONLINE_MODE` starts online
   co-op at the first game frame - his start screen did this); `report_url` and the report include
-  removed (the report sender isn't taken). The relay (`mode = server`) only with a lobby named there
-  (`lobby =`, `LAONLINE_LOBBY`): without one the session is picked on the menu's Online page, which starts online play
+  removed (the report sender isn't taken). The relay (`mode = server`) only with a lobby named by
+  `LAONLINE_LOBBY` (tests; his installer writes a `lobby =` into every player's laonline.ini, and his game never
+  joined it by itself, so the ini's doesn't count): otherwise the session is picked on the menu's Online page, which starts online play
   in it (`laonline_session_override` + `laonline_launch_mode`, as his start screen did), and configuration alone never
   starts it, as in his build. Online play counts as set up (`laonline_configured`) when `laonline.ini` names a relay
   (`server`) as well as when it sets a mode: his installer writes the relay. No default relay (it was a LAN address
