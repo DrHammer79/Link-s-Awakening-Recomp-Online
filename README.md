@@ -106,8 +106,9 @@ chat, PvP and Z-targeting. Thank you for it. Here it runs on game 1.0.0 and 1.0.
 - **Several players on one PC:** each local co-op player goes online as a player of their own ("Name P2", ...), with
   their own Link, hearts and colour, their own PvP (each turns it on with their own R3) and their own Z-target (their
   ZL). Progress, items and the save stay one per PC.
-- What came over from LA-Online V15.2 and what changed: [docs/laonline-port.md](docs/laonline-port.md); the relay
-  protocol the game speaks: [docs/laonline-protocol.md](docs/laonline-protocol.md).
+- What's new in 16.0, for players and relay hosts: [docs/laonline-16.md](docs/laonline-16.md). Every change from
+  LA-Online V15.2: [docs/laonline-port.md](docs/laonline-port.md); the relay protocol the game speaks:
+  [docs/laonline-protocol.md](docs/laonline-protocol.md).
 
 **Playing with friends without LA-Online:** the co-op is local - every player's controller on the PC running the game.
 Friends elsewhere can also join it through a game-streaming service that passes their controllers through as pads on
