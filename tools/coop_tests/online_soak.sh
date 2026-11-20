@@ -35,7 +35,7 @@ run soak_bob $SECS Bob 1 "LARECOMP_INPUT=$INPUT" &  # (its end stops Alice's too
 wait $(jobs -p | grep -v "^$RELAY$")
 kill $RELAY 2>/dev/null
 fail=0
-check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; fail=1; fi; }
+check() { if (eval "$2"); then echo "PASS $1"; else echo "FAIL $1"; fail=1; fi; }
 check "all three joined once (nobody dropped and back)" '[ "$(grep -c "^join " build/relay_soak.log)" = 3 ]'
 check "nobody left before the end" '[ "$(grep -c "^leave " build/relay_soak.log)" -le 3 ] && ! grep -qF "[laonline] server: disconnected" build/run_soak_alice.log build/run_soak_bob.log'
 check "both games drew frames to the end" 'for f in alice bob; do t=$(grep -oE "^\[vk\] t=[0-9.]+" build/run_soak_$f.log | tail -1 | cut -d= -f2); [ "${t%.*}" -ge $((SECS - 90)) ] || exit 1; done'

@@ -186,3 +186,33 @@ The rules the review set for this fork's co-op, checked for online play (2026-11
 The save-safe grants, local players on the relay and the Online page above were tested against a stand-in relay
 (`tools/laonline_relay.py`, written from his client: `docs/laonline-protocol.md`), not his relay, which isn't public.
 PvP and Z-targeting act for every player of a PC (`tools/coop_tests/online_pvp.sh`).
+
+## Against LA-Online's own relay (2026-11-18)
+
+Its developer sent the relay he runs (Docker: `server.py`, `protocol.py`, `report_backend.py`; V15.2's - not in this
+repository). Read in full, then run here through `tools/laonline_real_relay.py` (it unchanged; wrapped only to log the
+stand-in's lines, so every online test runs against it: `LAO_RELAY=<its folder>`, `tools/coop_tests/README.md`).
+
+- **A session room's lobby admits only the room's members, by name** (`Directory.admit`). Local players 2..8 were
+  turned away from it every few seconds ("Join this session through its room code or public listing first.") - the
+  stand-in had let them in. Each now takes a place in the room (`runtime/ui/laonline_lobby.mm`, "this PC's other
+  players' places"): joins it by its code with his online name and colour, is Ready when Player 1 is, keeps the place
+  with a poll every 5 s (the relay takes Ready from a member unseen for 10 s, the place after 2 minutes), gives it back
+  when he leaves the game or Player 1 the room; his token is kept in `laonline-rejoin-local.txt`. His connection
+  (`laonline_local.c`) opens only with it (`laonline_lobby_seat_ok`). The relay's 4 places then count every player, as
+  its 4-player lobby (`--max-players 4`) does anyway; one who finds it full plays on his PC only (a note on the page).
+  The host's Start waits for a player from another PC (this PC's own don't count).
+- **PvP frames only after the V12 query** - the relay drops a connection that sends one before. Each local player's
+  connection now asks, as Player 1's does.
+- **In a Co-op Randomizer lobby a STATE counts only once its sender's world is registered and matches.** Each local
+  player's connection registers Player 1's world (`laonline_coop_world_frame`: the same WORLD frame).
+- **Local connections open once Player 1's is in the same lobby** (`laonline_relay_on`: the lobby of his last WELCOME),
+  so his is the lobby's first - the relay's lobby host, whose world the lobby takes. His connected status alone wasn't
+  enough: moving from a session to Global, his old connection still counted while it closed, and his Player 2 was in
+  Global before him.
+- **Open:** in `online_soak.sh` against it, Bob's hearts ran out to PvP hits (half a heart each - the stand-in gave a
+  quarter, so no one had been knocked out there) and both games stopped drawing frames as his Game Over began (the
+  main threads in the game's shared-pointer release, `SP_RELEASE`). Not reproduced yet: a run with Bob knocked out on
+  the first hit was spoiled by another heavy program on the PC.
+- The stand-in now follows these rules too (room lobbies, 4 per lobby, a name once per lobby and room, PvP's query and
+  rate limits, start once all are Ready, members pruned), and names room lobbies as the relay does (`V10-<code>`).

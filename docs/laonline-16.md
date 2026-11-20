@@ -12,6 +12,9 @@ why, is in [laonline-port.md](laonline-port.md); the relay protocol the game spe
 - **The Online page** in the game's menu (F1, or Minus + Plus): host a private session (with a room code) or a public
   one, join by code or from the list of public sessions, Ready, and the host starts it. Its other tabs: **Global**
   (everyone online at once, each in their own world) and **Leaderboards** (completed runs; submit your own).
+- **A session holds 4 players, local ones included** (two PCs with two players each, say): each local player takes a
+  place of their own in it, and is Ready when Player 1 is. One who finds it full plays on their PC only. Global has
+  room for 100.
 - **Co-op Randomizer:** the host's seed comes to the others' games by itself (patches against each player's own game
   files - no game files are sent) and their games switch to it.
 - **PvP and Z-targeting for every player.** Each one turns PvP on with their own R3 (F6 for Player 1 too) and locks on
@@ -29,22 +32,26 @@ why, is in [laonline-port.md](laonline-port.md); the relay protocol the game spe
 
 ## For relay hosts
 
-Nothing in the protocol is new - 16.0 sends and expects what V15.2 does (the same HELLO, session service, seed
-transfer, leaderboards, Global and PvP messages). What is new is *who* connects:
+**16.0 runs on LA-Online's relay as it is** - V15.2's `server.py`, unchanged, run as its Docker setup runs it (4
+players per lobby): the online tests pass against it (2026-11-18; one open: in the 8-minute run a PvP knock-out
+froze both games once - not yet reproduced, see laonline-port.md). Nothing in the protocol is new - 16.0 sends and
+expects what V15.2 does (the same HELLO, session service, seed transfer, leaderboards, Global and PvP messages). What
+is new is *who* connects:
 
-1. **Version 16.0.** Each connection's HELLO carries `LAOV 16.0`. A relay that only refuses versions older than its
-   minimum lets it in; one that wants an exact version needs 16.0 added.
+1. **Version 16.0.** Each connection's HELLO and session request carries 16.0; the relay asks for 15.2 or newer.
 2. **Several players from one PC.** Each local co-op player 2..8 opens a connection of their own to the same relay,
-   with the same lobby and password as that PC's Player 1, named "<Player 1's name> P<n>" (P2..P8). In a session
-   (a room) only Player 1 is a member of the room; their local players join the room's lobby with its lobby name and
-   password but are **not room members**. A relay that only admits a room's members to its lobby needs to admit these
-   too (or count them as the member's). A lobby can then hold more Links than the room's 4 places: 4 PCs x up to 8.
-3. **Many connections from one address.** Those players' connections all come from the same IP address.
-4. **Their PvP** (switch, attacks, hits, knock-outs) comes on their own connection, so the relay names each of them
-   as the attacker or the one hit, as for any player.
+   with the same lobby and password as that PC's Player 1, named "<Player 1's name> P<n>" (P2..P8). The relay lets
+   only a room's members into its lobby, so in a session each of them also **takes a place in the room** (joins it by
+   its code through the session service, Ready when Player 1 is). A room's 4 places therefore count every player - two
+   PCs with two players each, say. A local player who finds the room full plays on that PC only (the Online page says
+   so); in Global (100 places) and in a lobby named in `laonline.ini` (the relay's `--max-players`) there are no rooms.
+3. **Many connections from one address.** Those players' connections all come from the same IP address (the relay has
+   no limit per address).
+4. **Their PvP** (switch, attacks, hits) comes on their own connection, after its own V12 query, so the relay names
+   each of them as the attacker or the one hit, as for any player.
 
-None of this could be checked against the real relay yet (it isn't public): the game was tested against a stand-in
-written from V15.2's client code (`tools/laonline_relay.py`, `tools/coop_tests/online_*.sh`).
+The tests (`tools/coop_tests/online_*.sh`) run against a stand-in relay that follows the real one's rules
+(`tools/laonline_relay.py`), or against the real one itself: `LAO_RELAY=<its folder>` (`tools/coop_tests/README.md`).
 
 ## For the developer
 
@@ -54,8 +61,9 @@ written from V15.2's client code (`tools/laonline_relay.py`, `tools/coop_tests/o
   players on the relay), `runtime/ui/laonline_lobby.mm` (the Online page, from V15.2's `session_ui.mm`).
 - **Addresses:** every game address is named, for game 1.0.0 and 1.0.1, in `runtime/game_addresses/`
   (`tools/test_game_addresses.py` checks them).
-- **Tests:** `tools/coop_tests/online*.sh` run two copies of the game on one PC against the stand-in relay - lobby,
-  Global, leaderboards, PvP, the seed transfer, leaving and rejoining, the relay restarting, an 8-minute run.
+- **Tests:** `tools/coop_tests/online*.sh` run two copies of the game on one PC against the stand-in relay or your own
+  (`LAO_RELAY`) - lobby, Global, leaderboards, PvP, the seed transfer, leaving and rejoining, the relay restarting, an
+  8-minute run.
   V15.2's unit tests (`tests/*.c`) aren't carried: they check what 16.0 changed on purpose (shared items written into
   the save, PvP for one player per PC) and build against V15.2's own start screen; they stay in this repository's
   history.

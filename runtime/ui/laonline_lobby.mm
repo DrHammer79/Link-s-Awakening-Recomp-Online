@@ -261,6 +261,21 @@ static void put_rgb(std::vector<uint8_t> &b, const CosColour *c, int slot, uint3
     b.insert(b.end(), {(uint8_t)(rgb >> 16), (uint8_t)(rgb >> 8), (uint8_t)rgb});
 }
 
+// A request's body: u8 version 1, u8 action, then its fields in the relay's order (docs/laonline-protocol.md 6a).
+static std::vector<uint8_t> session_body(int action, const std::string &code, const std::string &token, const std::string &name,
+                                         const std::string &world, const std::string &seed, const std::string &title, bool ready,
+                                         const std::vector<uint8_t> &colours, const std::string &search, int filter, int sort, int page) {
+    std::vector<uint8_t> b = {1, (uint8_t)action};
+    put_str(b, code), put_str(b, token), put_str(b, name), put_str(b, LAO_ROOM_BUILD);
+    b.push_back(seed.empty() ? 1 : 2);  // (a randomizer seed played: a Co-op Randomizer session)
+    put_str(b, world), put_str(b, seed), put_str(b, title), put_str(b, "");  // (no description)
+    b.push_back(ready);
+    b.insert(b.end(), colours.begin(), colours.end());
+    put_str(b, search);
+    b.push_back((uint8_t)filter), b.push_back((uint8_t)sort), b.push_back((uint8_t)page), b.push_back((uint8_t)(page >> 8));
+    return b;
+}
+
 // Actions: 0 list, 1 host private, 2 host public, 3 join (code), 4 poll, 5 ready, 6 start, 7 leave, 8 new code, 9 rename.
 static void request(int action, const std::string &code = "", bool ready = false, int page = 0, const char *rename = nullptr) {
     bool own = action != 0 && action != 4;
@@ -288,15 +303,8 @@ static void request(int action, const std::string &code = "", bool ready = false
     put_rgb(colours, &g_settings.hair, COL_SLOT_HAIR, 0xffdf57);
     std::thread([=]() {
         std::string world, seed;
-        int mode = seed_describe(world, seed) ? 2 : 1;  // (a randomizer seed played: a Co-op Randomizer session)
-        std::vector<uint8_t> b = {1, (uint8_t)action};
-        put_str(b, code), put_str(b, token), put_str(b, name), put_str(b, LAO_ROOM_BUILD);
-        b.push_back((uint8_t)mode);
-        put_str(b, world), put_str(b, seed), put_str(b, title), put_str(b, "");  // (no description)
-        b.push_back(ready);
-        b.insert(b.end(), colours.begin(), colours.end());
-        put_str(b, search);
-        b.push_back((uint8_t)filter), b.push_back((uint8_t)sort), b.push_back((uint8_t)page), b.push_back((uint8_t)(page >> 8));
+        seed_describe(world, seed);
+        std::vector<uint8_t> b = session_body(action, code, token, name, world, seed, title, ready, colours, search, filter, sort, page);
         Directory d;
         try { d = decode(exchange(address, b, 0x30)); }
         catch (const std::exception &e) { d.message = e.what(); }
@@ -319,6 +327,132 @@ static void request(int action, const std::string &code = "", bool ready = false
 
 static std::string my_name(const Directory &d) { return !d.self_name.empty() ? d.self_name : g_name[0] ? g_name : "Player"; }
 
+// ---------------------------------------------------------------- this PC's other players' places in the room
+// LA-Online's relay lets a player into a session room's lobby only if he is one of the room's members (by name:
+// server.py's Directory.admit), and a room has 4 places. So each of this PC's other players who is in the game
+// (coop_joined: players 2..8) takes a place of his own: he joins the room by its code with his online name
+// (laonline_local_name - his relay connection's) and his colour, is Ready when Player 1 is, keeps his place (a poll
+// every 5 s: the relay takes Ready from a member it hasn't seen for 10 s, and the place after 2 minutes) and gives it
+// back when he leaves the game or Player 1 leaves the room. His relay connection (laonline_local.c) opens only once he
+// has it (laonline_lobby_seat_ok). A full room: he plays on this PC only (a note on the page). His place's token is
+// kept in laonline-rejoin-local.txt (a game started again takes it back, as Player 1's laonline-rejoin.txt).
+extern "C" uint32_t coop_joined(void);           // hle/coop.c
+extern "C" uint32_t coop_colour_rgb(int player);
+extern "C" void laonline_local_name(const char *first, int i, char out[17]);  // hle/laonline_local.c
+struct Seat { std::string token, code, name, note; bool busy = false; uint64_t at = 0, poll_at = 0; };
+static Seat g_seat[8];  // (g_lock) players 2..8: 1..7
+static std::atomic<bool> g_session_on(false);  // online play started in a room (g_launched, for laonline_local.c)
+
+static void seats_save(void) {  // (g_lock held) "<code> <token> <name>" per place
+    std::ofstream f("laonline-rejoin-local.txt", std::ios::trunc);
+    for (int i = 1; i < 8; i++)
+        if (f && !g_seat[i].token.empty()) f << g_seat[i].code << " " << g_seat[i].token << " " << g_seat[i].name << "\n";
+}
+static std::string seat_rejoin_token(const std::string &code, const std::string &name) {
+    std::ifstream f("laonline-rejoin-local.txt");
+    std::string line;
+    while (f && std::getline(f, line)) {
+        size_t a = line.find(' '), b = a == std::string::npos ? a : line.find(' ', a + 1);
+        if (b != std::string::npos && line.compare(0, a, code) == 0 && b - a - 1 == 32 && line.substr(b + 1) == name)
+            return line.substr(a + 1, 32);
+    }
+    return "";
+}
+
+static void seat_request(int i, int action, const std::string &code, const std::string &token, const std::string &name, bool ready = false) {
+    { std::lock_guard<std::mutex> lock(g_lock); g_seat[i].busy = true; }
+    uint32_t rgb = coop_colour_rgb(i);
+    std::vector<uint8_t> colours = {(uint8_t)(rgb >> 16), (uint8_t)(rgb >> 8), (uint8_t)rgb};
+    put_rgb(colours, &g_settings.hair, COL_SLOT_HAIR, 0xffdf57);
+    std::string address = g_endpoint;
+    std::thread([=]() {
+        std::string world, seed;
+        seed_describe(world, seed);
+        std::vector<uint8_t> b = session_body(action, code, token, name, world, seed, "", ready, colours, "", 0, 0, 0);
+        Directory d;
+        bool answered = false;
+        try { d = decode(exchange(address, b, 0x30)), answered = true; }
+        catch (const std::exception &e) { d.message = e.what(); }
+        std::lock_guard<std::mutex> lock(g_lock);
+        Seat &s = g_seat[i];
+        s.busy = false;
+        if (action == 7) {
+            if (s.token == token) s.token.clear(), s.code.clear();
+            LOG("[lobby] player %d left session %s\n", i + 1, code.c_str());
+        } else if (d.success) {
+            if (action == 3) {
+                s.token = d.token, s.code = d.rooms.empty() ? code : d.rooms[0].code, s.name = name, s.note.clear();
+                LOG("[lobby] player %d has a place in session %s as '%s'\n", i + 1, s.code.c_str(), name.c_str());
+            }
+            if (action == 5) s.at = now_ms() + 2500;  // (Player 1's next poll shows it)
+        } else if (answered && action == 3) {  // (the relay said no: the room is full, say)
+            if (s.note != d.message) LOG("[lobby] player %d gets no place in session %s: %s\n", i + 1, code.c_str(), d.message.c_str());
+            s.note = d.message, s.at = now_ms() + 10000;
+        } else if (answered && action == 4) {  // (a poll refused: his place is gone - he joins again)
+            LOG("[lobby] player %d lost his place in session %s: %s\n", i + 1, code.c_str(), d.message.c_str());
+            s.token.clear(), s.code.clear();
+        } else s.at = now_ms() + (answered ? 2500 : 3000);  // (Ready refused - the room just started, say - or no
+                                                            // answer: Player 1's next poll shows the room; tried again)
+        seats_save();
+    }).detach();
+}
+
+// Each frame (laonline_lobby_frame): what each of this PC's other players' places needs next - one request at a time each.
+static void seats_tick(const Directory &d, bool in_room) {
+    uint32_t joined = coop_joined();
+    std::string me = my_name(d);
+    const Room *room = in_room ? &d.rooms[0] : nullptr;
+    bool ready = false;
+    if (room)
+        for (auto &m : room->players) if (m.name == me) ready = m.ready;
+    uint64_t now = now_ms();
+    for (int i = 1; i < 8; i++) {
+        Seat s;
+        { std::lock_guard<std::mutex> lock(g_lock); s = g_seat[i]; }
+        if (s.busy) continue;
+        char name[17];
+        laonline_local_name(me.c_str(), i, name);
+        bool wanted = room && (joined >> i & 1);
+        if (!s.token.empty() && (!wanted || s.code != room->code || s.name != name)) { seat_request(i, 7, s.code, s.token, s.name); continue; }
+        if (!wanted) {
+            if (!s.note.empty()) { std::lock_guard<std::mutex> lock(g_lock); g_seat[i].note.clear(), g_seat[i].at = 0; }
+            continue;
+        }
+        if (now < s.at) continue;
+        if (s.token.empty()) { seat_request(i, 3, room->code, seat_rejoin_token(room->code, name), name); continue; }
+        const Member *m = nullptr;
+        for (auto &x : room->players) if (x.name == s.name) m = &x;
+        if (!room->started && m && m->ready != ready) { seat_request(i, 5, s.code, s.token, s.name, ready); continue; }
+        if (now >= s.poll_at) {
+            { std::lock_guard<std::mutex> lock(g_lock); g_seat[i].poll_at = now + 5000; }
+            seat_request(i, 4, s.code, s.token, s.name);
+        }
+    }
+}
+
+// The room's members from other PCs (not this player, nor this PC's other players): the host starts once there is one.
+static int others_in(const Room &room, const std::string &me) {
+    int n = 0;
+    for (auto &m : room.players) {
+        bool ours = m.name == me;
+        for (int i = 1; i < 8 && !ours; i++) {
+            char name[17];
+            laonline_local_name(me.c_str(), i, name);
+            ours = m.name == name;
+        }
+        n += !ours;
+    }
+    return n;
+}
+
+// (hle/laonline_local.c, its network thread) May local player i (1..7) go on the relay? In a session room's lobby only
+// with his place in the room; anywhere else (Global, laonline.ini's lobby) anyone may.
+extern "C" int laonline_lobby_seat_ok(int i) {
+    if (!g_session_on.load()) return 1;
+    std::lock_guard<std::mutex> lock(g_lock);
+    return i > 0 && i < 8 && !g_seat[i].token.empty();
+}
+
 // A room being left: no longer this player's from the moment he leaves - not only once the relay's answer comes, a
 // few frames later: in between, the room still listed as started (and this player not in it any more) began the
 // session again, so he stayed online in its lobby (online_flows.sh).
@@ -331,7 +465,7 @@ static void leave(const Directory &d) {
     if (g_launched) {
         laonline_launch_mode(0);
         laonline_session_override(nullptr, nullptr, nullptr);
-        g_launched = false;
+        g_launched = false, g_session_on = false;
         LOG("[lobby] left session %s: online play off\n", g_launched_room.c_str());
     }
     g_note.clear();
@@ -351,7 +485,7 @@ static void try_launch(const Directory &d, const Room &room) {
     std::string name = my_name(d);
     laonline_session_override(name.c_str(), lobby.c_str(), d.password.c_str());
     laonline_launch_mode(room.mode);
-    g_launched = true, g_launched_room = room.code, g_note.clear();
+    g_launched = true, g_session_on = true, g_launched_room = room.code, g_note.clear();
     LOG("[lobby] session %s started: online play as '%s' in lobby %s (%s)\n", room.code.c_str(), name.c_str(),
            lobby.c_str(), room.mode == 2 ? "co-op randomizer" : "co-op");
 }
@@ -410,7 +544,7 @@ static void test_drive(const Directory &d) {
     }
     if (room.started) return;
     if (!ready) request(5, room.code, true);
-    else if (host && all && room.players.size() >= 2) request(6, room.code);
+    else if (host && all && others_in(room, me) >= 1) request(6, room.code);
 }
 
 // ---------------------------------------------------------------- a Co-op Randomizer room's seed (his V13 / V15.2)
@@ -530,6 +664,7 @@ extern "C" void laonline_lobby_frame(void) {
     if (!g_leaving.empty() && (d.token.empty() || d.rooms.empty() || d.rooms[0].code != g_leaving)) g_leaving.clear();
     test_drive(d);
     bool in_room = in_room_of(d);
+    seats_tick(d, in_room);
     if (!in_room) return;
     const Room &room = d.rooms[0];
     {   // (the test's log: each change of the room)
@@ -616,6 +751,11 @@ static void room_view(const Directory &d, float s) {
             ImGui::TextDisabled("%s", L("Waiting for a player..."));
         ImGui::PopID();
     }
+    for (int i = 1; i < 8; i++) {  // (this PC's other players without a place: the room is full, say)
+        std::string note;
+        { std::lock_guard<std::mutex> lock(g_lock); note = g_seat[i].note; }
+        if (!note.empty()) ImGui::TextDisabled("%s %d %s %s", L("Player"), i + 1, L("plays on this PC only:"), note.c_str());
+    }
     ImGui::Spacing();
 
     if (room.started) {
@@ -628,10 +768,11 @@ static void room_view(const Directory &d, float s) {
         ImGui::EndDisabled();
         if (host) {
             ImGui::SameLine();
-            ImGui::BeginDisabled(busy || !all || room.players.size() < 2 || !d.success);
+            int others = others_in(room, me);  // (this PC's own players don't count: another PC's)
+            ImGui::BeginDisabled(busy || !all || others < 1 || !d.success);
             if (ImGui::Button(L("Start the session"), ImVec2(220 * s, 0))) request(6, room.code);
             ImGui::EndDisabled();
-            ImGui::TextDisabled("%s", room.players.size() < 2 ? L("Waiting for another player to join...")
+            ImGui::TextDisabled("%s", others < 1 ? L("Waiting for another player to join...")
                                       : !all ? L("Waiting for every player to be ready.")
                                              : L("Everyone is ready: start the session."));
         } else
@@ -802,7 +943,7 @@ static void global_join(void) {
     laonline_session_override(name.c_str(), "", "");  // (the name; Global's lobby is its own, with no password)
     laonline_v12_global_variant(rando);
     laonline_launch_mode(3);
-    g_launched = false, g_note.clear();
+    g_launched = false, g_session_on = false, g_note.clear();
     LOG("[lobby] Global%s: online play as '%s'\n", rando ? " Randomizer" : "", name.c_str());
 }
 static void global_leave(void) {

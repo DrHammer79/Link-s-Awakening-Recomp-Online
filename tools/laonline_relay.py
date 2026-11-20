@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""tools/laonline_relay.py [port]: a stand-in for LA-Online's relay server (its "Docker relay v1", server.py, isn't
-public), for tests on one PC. Written from what the client sends and accepts (docs/laonline-protocol.md): lobbies by
-name, ids, the roster, every player's state / hearts / look / map marker passed to the others, shared progress (each
-flag kept, the highest value per item key, both replayed to late joiners), pickups, death notices, chat, the co-op
-seed handshake and its rewards, checks, story and inventory, PvP's state and hits. Where the real relay's rules aren't
-known it takes the safe choice the spec lists (section 8): the lowest free id; chat echoed to its sender, death
-notices not; each player's last hearts / location / look / marker / PvP state replayed to newcomers; the first
-joiner sets a lobby's password and seed. A test tool, not a server for play.
+"""tools/laonline_relay.py [port] [max players]: a stand-in for LA-Online's relay server (server.py, its developer's,
+not public), for tests on one PC. Written from what the client sends and accepts (docs/laonline-protocol.md): lobbies
+by name, ids, the roster, every player's state / hearts / look / map marker passed to the others, shared progress
+(each flag kept, the highest value per item key, both replayed to late joiners), pickups, death notices, chat, the
+co-op seed handshake and its rewards, checks, story and inventory, PvP's state and hits. Its rules are the real
+relay's (V15.2's server.py, read 2026-11-18) where they matter to the client: a session room's lobby ("V10-<code>")
+admits only the room's members, by name, once it started; 4 players per lobby (the developer's Docker setup; 100 in
+Global, whose lobbies take only Global's HELLO); a name once per lobby; PvP frames only after the V12 query (else the
+connection is dropped), hits only between players who both have PvP on, half a heart unless it says, at most one per
+0.45 s per target and none on a player hit in the last 0.8 s; rooms of 4, a name once per room, a member not seen for
+10 s not Ready and for 2 minutes gone. Elsewhere the safe choice the spec lists (section 8): the lowest free id; chat
+echoed to its sender, death notices not; each player's last hearts / location / look / marker / PvP state replayed
+to newcomers; the first joiner sets a lobby's password and seed. A test tool, not a server for play.
 
 Clients: laonline.ini `mode = server`, `server = 127.0.0.1:<port>` (default port 47620). Logs one line per event on
 stdout ("join", "leave", "flag", "item", "pickup", "reward", ...), which the tests read. Python 3.8+, standard
-library only. Ctrl+C stops it.
+library only. Ctrl+C stops it. With LAO_RELAY set to the folder of LA-Online's own relay it runs that one instead,
+with these log lines (tools/laonline_real_relay.py).
 """
 import asyncio
 import hashlib
+import os
 import secrets
 import struct
 import sys
@@ -22,6 +29,7 @@ CAP_REPLIES = {0x4c414f51, 0x4c414f53, 0x4c414f55, 0x4c414f57, 0x4c414f59, 0x4c4
                0x4c414f61, 0x4c414f63, 0x4c414f67, 0x4c414f70}  # each answered with nonce + 1 (spec section 3)
 V12_EXTRAS = (0x4c414f72, 0x4c414f73, 0x4c414f74, 0x4c414f75)  # sent unprompted with the V12 reply
 INV_SIZE = 67
+MAX_PLAYERS = int(sys.argv[2]) if __name__ == '__main__' and len(sys.argv) > 2 else 4  # (per lobby; Global: 100)
 
 
 def log(*a):
@@ -59,6 +67,8 @@ class Player:
         self.w, self.id, self.lobby, self.name, self.rgb = writer, None, None, b'', b'\0\0\0'
         self.last = {}            # 0x8B / 0x8C / 0x8D / 0x93 / 0xA2 -> the last body passed on (late joiners)
         self.digest = None
+        self.v12, self.pvp = False, False   # (the V12 query seen; PvP on)
+        self.hit_at, self.hurt_at = {}, -99.0  # (target id -> its last hit from him; his last hit taken)
 
     def send(self, body):
         try:
@@ -96,15 +106,30 @@ def hello(p, t, b):
     version = b''
     if b[o:o + 4] == b'LAOV':
         n = b[o + 4]; version = bytes(b[o + 5:o + 5 + n])
-    if t == 0x31:
+    def refuse(code, msg):
+        p.send(bytes([0x8F, code]) + put_str(msg.encode()))
+        log(f'refused {name.decode(errors="replace")}: {msg} (lobby {lobby.decode(errors="replace")})')
+        return False
+    if t == 0x31:  # (Global: its own two lobbies, no password)
         password = b''
+        lobby = b'V10-GLOBAL-RANDO' if lobby == b'V10-GLOBAL-RANDO' else b'V10-GLOBAL'
+    elif lobby.startswith(b'V10-GLOBAL'):
+        return refuse(6, 'Global requires the social-only client handshake.')
+    for r in rooms.values():  # (a session room's lobby: its members only, once it started)
+        if r.lobby() == lobby:
+            prune()
+            if not r.started:
+                return refuse(5, 'The host has not started this session.')
+            if password != r.password or name not in [m.name for m in r.members]:
+                return refuse(5, 'Join this session through its room code or public listing first.')
     L = lobbies.setdefault(lobby, Lobby(lobby, password))
     if L.password != password:
-        msg = b'Wrong lobby password'
-        p.send(bytes([0x8F, 1, len(msg)]) + msg)
-        log(f'refused {name.decode(errors="replace")}: password (lobby {lobby.decode(errors="replace")})')
-        return False
-    pid = next(i for i in range(100) if i not in L.players)
+        return refuse(5, 'Wrong lobby password.')
+    if any(q.name.lower() == name.lower() for q in L.players.values()):
+        return refuse(3, f'Someone in this lobby is already called {name.decode(errors="replace")}.')
+    pid = next((i for i in range(100 if t == 0x31 else MAX_PLAYERS) if i not in L.players), None)
+    if pid is None:
+        return refuse(4, 'Lobby is full.')
     p.id, p.lobby, p.name, p.rgb = pid, L, name[:16] or b'Player', rgb
     roster = b''.join(bytes([q.id, len(q.name)]) + q.name + q.rgb for q in L.players.values())
     flags = b''.join(struct.pack('<I', f) for f in sorted(L.flags))
@@ -128,6 +153,7 @@ def handle(p, b):
         (v,) = struct.unpack_from('<I', b, 1)
         p.send(bytes([0x89]) + struct.pack('<I', v + 1 if v in CAP_REPLIES else v))
         if v == 0x4c414f70:
+            p.v12 = True
             for x in V12_EXTRAS:
                 p.send(bytes([0x89]) + struct.pack('<I', x))
         return
@@ -214,15 +240,21 @@ def handle(p, b):
     elif t == 0x19:   # DEATH: to the others (an echo would show the sender its own notice)
         log(f'death of {p.id}')
         to_others(p, bytes([0xA0]) + pid + b[1:14] + name17(p.name))
-    elif t == 0x1C:   # PVP
+    elif t == 0x1C:   # PVP (only after the V12 query: the real relay drops a connection that sends it before)
+        if not p.v12:
+            log(f'protocol error from {p.id}: PvP before the V12 query (dropped)')
+            return False
         kind = b[1]
         if kind == 0:
-            to_others(p, bytes([0xA2, 0]) + pid + b[2:3], 0xA2)
-            log(f'pvp {"on" if len(b) > 2 and b[2] else "off"} {p.id}')
+            p.pvp = len(b) > 2 and b[2] != 0
+            to_others(p, bytes([0xA2, 0]) + pid + bytes([int(p.pvp)]), 0xA2)
+            log(f'pvp {"on" if p.pvp else "off"} {p.id}')
         elif kind == 1 and len(b) >= 3:
-            target, quarters = b[2], b[3] if len(b) > 3 else 1
+            target, quarters = b[2], min(8, max(1, b[3])) if len(b) > 3 else 2  # (half a heart unless it says)
             q = L.players.get(target)
-            if q:
+            now = asyncio.get_running_loop().time()
+            if q and q is not p and p.pvp and q.pvp and now - p.hit_at.get(target, -99.0) >= 0.45 and now - q.hurt_at >= 0.8:
+                p.hit_at[target], q.hurt_at = now, now
                 q.send(bytes([0xA2, 1]) + pid + bytes([quarters]))
                 for r in L.players.values():  # (the hit confirmed to everyone: their hit markers - V14's kind 4)
                     r.send(bytes([0xA2, 4]) + pid + bytes([target, quarters]))
@@ -237,12 +269,35 @@ def handle(p, b):
 
 # ---------------------------------------------------------------- the session service (opcode 0x30): the rooms the
 # menu's Online page hosts, lists and joins (runtime/ui/laonline_lobby.mm; LA-Online V15.2's session_ui.mm). One request
-# per connection, answered with opcode 0xB0. A room's members then meet in its relay lobby ("room-<code>", ".rando" for
-# a Co-op Randomizer room) with its password. Its rules where the real relay's aren't known: 4 places; a name already
-# in the room gets " 2"; the host leaving hands the room to the next member; an empty room is gone.
+# per connection, answered with opcode 0xB0. A room's members then meet in its relay lobby ("V10-<code>", ".rando" for
+# a Co-op Randomizer room) with its password - only its members, by name. Its rules (the real relay's): 4 places; a
+# name once per room; the host starts once every member is Ready; a member not seen (a request of his, or his name
+# playing in the room's lobby) for 10 s isn't Ready, for 2 minutes is gone; the host leaving hands the room to the
+# next member; an empty room is gone.
 class Member:
     def __init__(self, token, name, rgb, hair):
         self.token, self.name, self.rgb, self.hair, self.ready, self.host = token, name, rgb, hair, False, False
+        self.seen = asyncio.get_running_loop().time()
+
+
+def prune():
+    now = asyncio.get_running_loop().time()
+    for code, r in list(rooms.items()):
+        L = lobbies.get(r.lobby())
+        playing = {q.name for q in L.players.values()} if L else set()
+        for m in list(r.members):
+            if m.name in playing:
+                m.seen = now
+            elif now - m.seen > 120:
+                r.members.remove(m)
+                log(f'session gone {r.code.decode()} {m.name.decode(errors="replace")} (not seen for 2 minutes)')
+            elif now - m.seen > 10:
+                m.ready = False
+        if not r.members:
+            del rooms[code]
+        elif not any(m.host for m in r.members):
+            r.members[0].host = True
+            r.host = r.members[0].name
 
 
 class Room:
@@ -256,7 +311,7 @@ class Room:
         self.host = host
 
     def lobby(self):
-        return b'room-' + self.code + (b'.rando' if self.mode == 2 else b'')
+        return b'V10-' + self.code + (b'.rando' if self.mode == 2 else b'')
 
     def wire(self):
         b = put_str(self.code) + put_str(self.title) + put_str(b'') + put_str(self.host)
@@ -298,13 +353,6 @@ def session(b):
         out += struct.pack('<HH', total, pg) + bytes([len(shown)])
         return out + b''.join(r.wire() for r in shown)
 
-    def member_of(tok):
-        for r in rooms.values():
-            for m in r.members:
-                if tok and m.token == tok:
-                    return r, m
-        return None, None
-
     def drop(r, m):
         r.members.remove(m)
         log(f'session leave {r.code.decode()} {m.name.decode(errors="replace")}')
@@ -314,30 +362,25 @@ def session(b):
             r.members[0].host = True
             r.host = r.members[0].name
 
-    def unique(r, n):
-        names = {m.name for m in r.members}
-        k, base = 2, n
-        while n in names:
-            n = base[:14] + b' ' + str(k).encode(); k += 1
-        return n
-
     def new_code():
         while True:
             c = ''.join(secrets.choice(CODE_LETTERS) for _ in range(6)).encode()
             if c not in rooms:
                 return c
 
+    prune()
+    if mode not in (1, 2):
+        return fail('This room needs a compatible client and game mode.')
     if action == 0:
-        listed = [r for r in rooms.values() if r.public and r.build == build and (filt == 0 or r.mode == filt)
-                  and search.lower() in r.host.lower()]
+        listed = [r for r in rooms.values() if r.public and (filt == 0 or r.mode == filt)
+                  and (search.lower() in r.title.lower() or search.lower() in r.host.lower())]
         keys = [lambda r: -len(r.members), lambda r: len(r.members), lambda r: -r.created, lambda r: r.title.lower()]
         listed.sort(key=keys[sort if sort < 4 else 0])
         return ok('', listed=listed[page * 8:page * 8 + 8], total=len(listed), pg=page)
     if action in (1, 2):
-        r, m = member_of(token)
-        if r:
-            drop(r, m)
-        r = Room(new_code(), title or name + b"'s session", name, 2 if mode == 2 else 1, action == 2, build, world, seed)
+        if token and any(m.token == token for r in rooms.values() for m in r.members):
+            return fail('Leave your current session before creating another.')
+        r = Room(new_code(), title or name + b"'s adventure", name, mode, action == 2, build, world, seed)
         m = Member(secrets.token_hex(16).encode(), name, rgb, hair)
         m.host = True
         r.members.append(m)
@@ -345,37 +388,43 @@ def session(b):
         log(f'session host {r.code.decode()} by {name.decode(errors="replace")} '
             f'({"public" if r.public else "private"}, {"co-op randomizer" if r.mode == 2 else "co-op"})')
         return ok('Session created.', m.token, r)
+    r = rooms.get(code)
     if action == 3:
-        r = rooms.get(code.upper())
         if not r:
-            return fail('No session with that code.')
+            return fail('Room not found or expired. Check the six-character code.')
         if r.build != build:
-            return fail(f'This session needs LA-Online {r.build.decode(errors="replace")}.')
-        old, m = member_of(token)
-        if old is r:
+            return fail('This adventure needs a different version of LA-Online. Update the game to join.')
+        m = next((x for x in r.members if token and x.token == token), None)
+        if m:  # (his place again: the token he kept)
+            m.name, m.rgb, m.hair, m.seen = name, rgb, hair, asyncio.get_running_loop().time()
             return ok('Welcome back.', m.token, r)
-        if old:
-            drop(old, m)
         if len(r.members) >= 4:
-            return fail('This session is full.')
-        m = Member(secrets.token_hex(16).encode(), unique(r, name), rgb, hair)
+            return fail('Session full: all four player slots are taken.')
+        if any(x.name.lower() == name.lower() for x in r.members):
+            return fail('That player name is already in this adventure. If it is you reconnecting, wait up to 2 '
+                        'minutes or pick another name.')
+        m = Member(secrets.token_hex(16).encode(), name, rgb, hair)
+        m.ready = r.started
         r.members.append(m)
         log(f'session join {r.code.decode()} {m.name.decode(errors="replace")} ({len(r.members)} in)')
         return ok('Joined the session.', m.token, r)
-    r, m = member_of(token)
-    if not r or r.code != code:
-        return fail('You are no longer in this session.')
+    m = next((x for x in r.members if token and x.token == token), None) if r else None
+    if not m:
+        return fail('Your room membership expired. Join again.')
+    m.seen = asyncio.get_running_loop().time()
     if action == 4:
         return ok('', m.token, r)
     if action == 5:
+        if r.started:
+            return fail('The adventure has already started.')
         m.ready = ready
         log(f'session ready {r.code.decode()} {m.name.decode(errors="replace")} {int(ready)}')
         return ok('', m.token, r)
     if action == 6:
         if not m.host:
-            return fail('Only the host can start the session.')
-        if len(r.members) < 2 or not all(x.ready for x in r.members):
-            return fail('Every player must be ready.')
+            return fail('Only the host can start the adventure.')
+        if not all(x.ready for x in r.members):
+            return fail('Every player must be ready before starting.')
         r.started = True
         log(f'session start {r.code.decode()} lobby {r.lobby().decode()} ({len(r.members)} players)')
         return ok('Session started.', m.token, r)
@@ -384,15 +433,18 @@ def session(b):
         return ok('Left the session.')
     if action == 8:
         if not m.host or len(r.members) != 1 or r.started:
-            return fail('A new code only before anyone joins.')
+            return fail('Only the host can change the code, before another player joins.')
         del rooms[r.code]
         r.code = new_code()
+        r.password = secrets.token_hex(8).encode()
         rooms[r.code] = r
         return ok('New room code.', m.token, r)
     if action == 9:
-        r.members.remove(m)
-        m.name = unique(r, name)
-        r.members.append(m)
+        if m.ready or r.started:
+            return fail('Mark Not Ready before changing your name.')
+        if any(x is not m and x.name.lower() == name.lower() for x in r.members):
+            return fail('That player name is already in this room.')
+        m.name = name
         if m.host:
             r.host = m.name
         return ok('Name changed.', m.token, r)
@@ -508,8 +560,9 @@ async def client(reader, writer):
             if p.lobby is None and b[0] in (0x01, 0x31):
                 if not hello(p, b[0], b):
                     break
-            else:
-                handle(p, b)
+            elif handle(p, b) is False:  # (a protocol error: the connection dropped, as the real relay does)
+                await writer.drain()
+                break
             await writer.drain()
     except (asyncio.IncompleteReadError, ConnectionError, struct.error, IndexError):
         pass
@@ -531,6 +584,10 @@ async def main():
 
 
 if __name__ == '__main__':
+    if os.environ.get('LAO_RELAY'):  # (LA-Online's own relay instead, with these log lines: tools/laonline_real_relay.py)
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import laonline_real_relay
+        sys.exit(laonline_real_relay.main([os.environ['LAO_RELAY']] + sys.argv[1:]))
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

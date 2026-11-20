@@ -58,6 +58,7 @@ empty, so the defaults, when missing). They play in the checkout: its own `save/
 | `armos.sh`, `armos_fight.sh` | the Armos Knight's target, traced |
 | `grave.sh`, `zol.sh`, `zolhit.sh`, `revive_zol.sh` | the ghost's grave's event, Red Zols' targets and hits (need the saves above) |
 | `online_flows.sh` | moving between sessions and the relay going away: two copies, Alice with 2 local players; a public session found in the list and started, then each goes to Global (leaving it - once, for good); her Player 2 follows her out of the session's lobby into Global; the relay stopped and started again: everyone back by themselves; PASS / FAIL each |
+| `online_seats.sh` | local players' places in a session room (the relay admits only a room's members to its lobby; 4 places): Alice with 3 players hosts, Bob with 2 joins; her Players 2 and 3 take places of their own, Bob's Player 2 finds it full; the four online, nobody turned away; her Player 3 leaves the game and Bob's Player 2 takes his place and goes online; PASS / FAIL each |
 | `online_soak.sh [seconds]` | a long online run (8 minutes): two copies, Alice with 2 local players, walking and swinging with PvP on; nobody dropped, no disconnects, both games drawing frames to the end, hits taken all along; PASS / FAIL each |
 | `online_seed.sh` | a Co-op Randomizer room's seed (needs `rando/LaoTest`: the file's head says how to make it): the helper's export as patches and import into an empty folder (the same world, no game file in the package); then two copies: Alice hosts on the seed and her game uploads it, Bob (vanilla) joins by code, his game downloads it and switches to it, and the session begins for both; PASS / FAIL each |
 | `online_global.sh` | Global and the leaderboards from the Online page: two copies with only a relay set up, Alice with 2 local players; all three join Global's lobby (its own HELLO) and see each other's Links; Bob submits a run and reads it back from the leaderboard; PASS / FAIL each |
@@ -66,3 +67,10 @@ empty, so the defaults, when missing). They play in the checkout: its own `save/
 | `online_relay.sh` | online play through a relay (`tools/laonline_relay.py`, a stand-in for LA-Online's): two copies, one with 2 local players; joins, each other's Links, a pickup and shared progress granted through the game's AddItem, the local Player 2 on the relay as a player of his own; PASS / FAIL each |
 | `online_net.sh` | online play between two copies of the game on this PC (direct host / join over UDP on 127.0.0.1): each sees the other connect and his Link appear; PASS / FAIL each |
 | `online.sh` | online play (LA-Online) on one PC: set up nowhere it leaves no trace (no online log lines, no journal files); in echo mode a puppet spawns, alone and beside 2 local players; PASS / FAIL each |
+
+The online tests that use a relay start the stand-in (`tools/laonline_relay.py`). To run them against LA-Online's own
+relay instead (its `server.py` and `protocol.py`, which aren't in this repository: its developer's), set `LAO_RELAY` to
+the folder they are in - `tools/laonline_relay.py` then runs it through `tools/laonline_real_relay.py`, which adds the
+same log lines the tests read, with 4 players per lobby as the developer's Docker setup runs it (`LAO_RELAY_MAX`
+changes that). Set it inside the shell that runs the test (an MSYS2 bash started from Git Bash doesn't get the
+caller's environment): `bash -c 'export LAO_RELAY=D:/path/to/relay; tools/coop_tests/online_pvp.sh'`.

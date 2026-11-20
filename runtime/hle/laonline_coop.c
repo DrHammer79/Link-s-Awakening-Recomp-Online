@@ -224,6 +224,15 @@ void laonline_coop_pickup(int item,int count,int index) {
  pthread_mutex_unlock(&lock);
  LOG("[laonline] V15 local pickup seq=%llu item=%d count=%d index=%d\n",(unsigned long long)event.seq,item,count,index);
 }
+// LAS Recomp Co-Op's port: the WORLD frame this PC's game sent (as laonline_coop_packet built it), for its other local
+// players' own relay connections (laonline_local.c): the relay passes a player's STATE in a Co-op Randomizer lobby only
+// once his world is registered and matches the lobby's. 0 until Player 1's was sent.
+int laonline_coop_world_frame(uint8_t *out,int capacity){
+ int n=0;pthread_mutex_lock(&lock);
+ size_t len=strlen(world_seed_id);
+ if(world_sent && seed_ok && capacity>=37+(int)len){out[0]=(uint8_t)(35+len);out[1]=0;out[2]=0x14;out[3]=world_required?1:0;memcpy(out+4,seed,32);out[36]=(uint8_t)len;memcpy(out+37,world_seed_id,len);n=37+(int)len;}
+ pthread_mutex_unlock(&lock);return n;
+}
 // Returns one complete TCP frame; no guest memory is touched here.
 int laonline_coop_packet(uint8_t *out,int capacity) {
  int n=0;pthread_mutex_lock(&lock);

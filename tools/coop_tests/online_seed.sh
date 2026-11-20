@@ -49,10 +49,10 @@ done
 wait $(jobs -p | grep -v "^$RELAY$")
 kill $RELAY 2>/dev/null
 check "Alice hosted a Co-op Randomizer session ($CODE)" '[ -n "$CODE" ] && grep -q "session host $CODE by Alice (private, co-op randomizer)" build/relay_seed.log'
-check "Alice's game uploaded the seed" 'grep -qE "seed upload room-$CODE.rando by Alice: [0-9]+ bytes$" build/relay_seed.log'
-check "Bob's game downloaded it" 'grep -qE "seed download room-$CODE.rando by Bob: [0-9]+ bytes" build/relay_seed.log && grep -qF "[lobby] seed download done" build/run_seed_bob.log'
+check "Alice's game uploaded the seed" 'grep -qE "seed upload V10-$CODE.rando by Alice: [0-9]+ bytes$" build/relay_seed.log'
+check "Bob's game downloaded it" 'grep -qE "seed download V10-$CODE.rando by Bob: [0-9]+ bytes" build/relay_seed.log && grep -qF "[lobby] seed download done" build/run_seed_bob.log'
 check "Bob's game switched to it" 'grep -qF "[lobby] the host'"'"'s seed is here (LaoTest): switching to it" build/run_seed_bob.log && grep -qF "[reboot] requested" build/run_seed_bob.log'
-check "the session began for both in its .rando lobby" 'grep -q "join [0-9]* Alice lobby room-$CODE.rando " build/relay_seed.log && grep -q "join [0-9]* Bob lobby room-$CODE.rando " build/relay_seed.log'
+check "the session began for both in its .rando lobby" 'grep -q "join [0-9]* Alice lobby V10-$CODE.rando " build/relay_seed.log && grep -q "join [0-9]* Bob lobby V10-$CODE.rando " build/relay_seed.log'
 check "no crash" '! grep -qE "FATAL|\[crash\]" build/run_seed_alice.log build/run_seed_bob.log'
 grep -E "^(session|seed|join)" build/relay_seed.log | head -12
 grep -hF "[lobby]" build/run_seed_alice.log build/run_seed_bob.log | head -10

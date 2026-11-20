@@ -906,6 +906,23 @@ static float g_anchor_history[LAO_PLAYERS][3],g_anchor_last_field[3];
 static int g_anchor_known[LAO_PLAYERS],g_anchor_have_field,g_anchor_cap;
 static atomic_int g_srv_status;
 static atomic_int g_retry_connection;
+/* LAS Recomp Co-Op's port: the lobby Player 1's connection is in (set at its WELCOME, cleared when it starts again),
+ * for the local players' own connections (laonline_local.c): each opens only once Player 1 is in the lobby it goes to.
+ * His connected status alone said yes for an old connection still closing - moving from a session to Global, a local
+ * player was in before him; in a room's lobby the first one in is the relay's lobby host, whose world it takes. */
+static pthread_mutex_t g_on_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_on_lobby[33], g_hello_lobby[33];
+static void relay_on_set(const char *lobby) {
+    pthread_mutex_lock(&g_on_lock);
+    snprintf(g_on_lobby, sizeof g_on_lobby, "%s", lobby ? lobby : "");
+    pthread_mutex_unlock(&g_on_lock);
+}
+int laonline_relay_on(const char *lobby) {
+    pthread_mutex_lock(&g_on_lock);
+    int on = g_on_lobby[0] && !strcmp(g_on_lobby, lobby) && atomic_load(&g_srv_status) == 1;
+    pthread_mutex_unlock(&g_on_lock);
+    return on;
+}
 int laonline_connection_status(void) {
     if(!atomic_load(&g_launch_online))return 0;
     int status=atomic_load(&g_srv_status);
@@ -1016,6 +1033,7 @@ static void srv_handle(const uint8_t *b, int len) {
         LOG("[laonline] A2 received player #%u health %u/%u quarter-hearts\n", b[1], b[2], b[3]);
     if (b[0] == S_WELCOME && accepted) {
         g_srv_status = 1; g_srv_refused[0] = 0;
+        relay_on_set(g_hello_lobby);  /* LAS Recomp Co-Op's port: the lobby Player 1 is in now */
         laonline_chat_identity(g_srv_session.local_id);
         LOG("[laonline] joined lobby as #%d\n", g_srv_session.local_id);
     }
@@ -1127,6 +1145,7 @@ static void *srv_thread(void *arg) {
         int launch_epoch=atomic_load(&g_launch_epoch);
         srv_clear();
         g_srv_status = 0;
+        relay_on_set(NULL);  /* LAS Recomp Co-Op's port: no lobby until this connection's WELCOME */
         struct addrinfo hints, *res = NULL;
         memset(&hints, 0, sizeof hints);
         hints.ai_family = AF_INET, hints.ai_socktype = SOCK_STREAM;
@@ -1169,6 +1188,7 @@ static void *srv_thread(void *arg) {
         buf[0] = (uint8_t)(n - 2), buf[1] = (uint8_t)((n - 2) >> 8);
         if (!send_all(s, buf, n)) { sock_close(s); sleep_ms(3000); continue; }
         LOG("[laonline] server: connected to %s:%s as '%s' (lobby %s, tunic #%06x)\n", host, port, login_name, session_lobby, rgb);
+        snprintf(g_hello_lobby, sizeof g_hello_lobby, "%s", session_lobby);  /* LAS Recomp Co-Op's port (relay_on_set) */
         static uint8_t rb[70000];
         int have = 0;
         uint64_t ping_at = now_ms();

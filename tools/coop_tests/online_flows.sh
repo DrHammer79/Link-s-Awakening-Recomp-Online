@@ -45,7 +45,7 @@ L1=build/relay_flows1.log
 line() { grep -n -m1 -E "$1" $L1 | cut -d: -f1; }
 CODE=$(grep -oE "session host [A-Z0-9]{6}" $L1 | head -1 | cut -d' ' -f3)
 check "the session: hosted, found in the list, started ($CODE)" '[ -n "$CODE" ] && grep -q "session join $CODE Bob" $L1 && grep -q "session start $CODE" $L1'
-check "Alice's Player 2 in the session's lobby" 'grep -q "join [0-9]* Alice P2 lobby room-$CODE " $L1'
+check "Alice's Player 2 in the session's lobby" 'grep -q "join [0-9]* Alice P2 lobby V10-$CODE " $L1'
 check "both left the session for Global" 'grep -q "session leave $CODE Alice" $L1 && grep -q "session leave $CODE Bob" $L1'
 check "left for good (the session not begun again while the leave was answered)" '[ "$(grep -c "\[lobby\] session $CODE started" build/run_flows_alice.log)" = 1 ] && [ "$(grep -c "\[lobby\] session $CODE started" build/run_flows_bob.log)" = 1 ]'
 check "her Player 2 out of the session's lobby, then into Global" '[ -n "$(line "leave [0-9]+ Alice P2")" ] && [ -n "$(line "join [0-9]+ Alice P2 lobby V10-GLOBAL")" ] && [ "$(line "leave [0-9]+ Alice P2")" -lt "$(line "join [0-9]+ Alice P2 lobby V10-GLOBAL")" ]'

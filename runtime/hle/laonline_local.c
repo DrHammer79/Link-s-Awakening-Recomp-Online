@@ -4,10 +4,17 @@
 // per relay connection, so each other local player who is in the game (runtime/hle/coop.c) gets a connection of his
 // own: the same relay, lobby and password as Player 1's (laonline_relay_login), his name "<Player 1's> P<n>", his
 // colour, and his Link's position, facing, animation and hearts - what the other PCs need to show him as a remote
-// Link with a name tag. Nothing else goes out on it: shared progress, pickups, deaths, chat and PvP stay Player 1's
+// Link with a name tag, and his own PvP (laonline_v12.c). Shared progress, pickups, deaths and chat stay Player 1's
 // connection's (one save per PC). What comes in on it is read and dropped, but for its WELCOME (the id the relay gave
-// him). No change to the protocol or the relay; the main connection leaves these ids out (laonline_local_peer_message,
-// laonline_local_hide: this PC doesn't show its own players as remote ones).
+// him) and the PvP hits on him. No change to the protocol or the relay; the main connection leaves these ids out
+// (laonline_local_peer_message, laonline_local_hide: this PC doesn't show its own players as remote ones).
+//
+// What LA-Online's relay (server.py, V15.2) asks of each connection, as of Player 1's: it opens once Player 1's is in
+// the same lobby (laonline_relay_on: so his is the lobby's first - its host, whose world the lobby takes); in a session
+// room's lobby only a member of the room gets in (the room's places: laonline_lobby_seat_ok,
+// runtime/ui/laonline_lobby.mm); PvP frames only after the V12 capability query (else the relay drops the connection);
+// in a Co-op Randomizer lobby a STATE counts only once his world - Player 1's (laonline_coop_world_frame) - is
+// registered.
 //
 // Relay mode only (laonline.ini mode = server). Game thread: laonline_local_tick (from warp.c with online play's ticks)
 // samples every 3rd frame, as Player 1's; laonline_local_animation (the animation hook, laonline.c) keeps each one's
@@ -51,6 +58,13 @@ typedef struct { int player, hp, max, down; float revive; uint32_t rgb; } CoopHu
 extern int coop_hud_rows(CoopHudRow *rows, int cap);
 extern int game_in_play(void);
 extern int laonline_relay_login(char *host, size_t hn, char *port, size_t pn, char *name, char *lobby, char *password);
+extern int laonline_relay_on(const char *lobby);  // (laonline.c: Player 1 is in this lobby)
+extern int laonline_lobby_seat_ok(int i);  // (runtime/ui/laonline_lobby.mm)
+extern int laonline_coop_world_frame(uint8_t *out, int capacity);
+
+// A local player's name online: Player 1's, then " P<n>" (16 at most, the relay's limit) - his relay connection's and
+// his place in a session room's (they must be the same: the relay lets a room's members in by name).
+void laonline_local_name(const char *first, int i, char out[17]) { snprintf(out, 17, "%.13s P%d", first, i + 1); }
 
 typedef struct {
     int in;                       // in the game, his Link found, sampled this time round
@@ -155,7 +169,7 @@ void laonline_local_hide(LaoSession *s) {
 typedef struct {
     sock_t s;
     uint8_t rb[4096];
-    int have, welcomed;
+    int have, welcomed, launch, queried, world_sent;
     uint64_t ping_at;
     uint8_t sent_hp, sent_max;
     uint32_t sent_rgb;
@@ -213,7 +227,7 @@ static void conn_close(Conn *k, int i) {
 static int conn_open(Conn *k, int i, uint32_t rgb) {
     char host[96], port[16], name[17], lobby[33], password[65], key[200];
     int launch = relay_login(host, port, name, lobby, password, key, sizeof key);
-    if (!launch) return 0;
+    if (!launch || !laonline_relay_on(lobby) || !laonline_lobby_seat_ok(i)) return 0;
     struct addrinfo hints, *res = NULL;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_INET, hints.ai_socktype = SOCK_STREAM;
@@ -234,7 +248,7 @@ static int conn_open(Conn *k, int i, uint32_t rgb) {
     fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
 #endif
     char me[17];
-    snprintf(me, sizeof me, "%.13s P%d", name, i + 1);
+    laonline_local_name(name, i, me);
     uint8_t b[300];
     int n = 0;
     b[n++] = launch == 3 ? 0x31 : 0x01;  // HELLO (Story Co-op / Co-op Randomizer: the lobby says which; Global: 0x31)
@@ -247,7 +261,7 @@ static int conn_open(Conn *k, int i, uint32_t rgb) {
     l = strlen(LAO_MOD_VERSION); b[n++] = (uint8_t)l; memcpy(b + n, LAO_MOD_VERSION, l); n += (int)l;
     k->s = s;
     if (!send_frame(s, b, n)) { conn_close(k, i); return 0; }
-    k->ping_at = ms_now(), k->sent_hp = k->sent_max = 0xff, k->sent_rgb = rgb;
+    k->ping_at = ms_now(), k->sent_hp = k->sent_max = 0xff, k->sent_rgb = rgb, k->launch = launch;
     snprintf(k->login, sizeof k->login, "%s", key);
     LOG("[laonline] local player %d: on the relay %s:%s as '%s' (lobby %s)\n", i + 1, host, port, me, lobby);
     return 1;
@@ -325,7 +339,19 @@ static void *net_thread(void *arg) {
             if (!conn_read(k, i)) { conn_close(k, i); retry_at[i] = now + 3000; continue; }
             if (!k->welcomed) continue;
             int ok = 1;
-            if (s.sampled_at != k->sent_sample) {  // STATE, then what changed
+            if (!k->queried) {  // (PvP: the relay takes his PvP frames only after this - Player 1's connection asks too)
+                uint8_t q[5] = {0x07, 0x70, 0x4f, 0x41, 0x4c};  // PING LAO_V12_QUERY
+                ok = send_frame(k->s, q, 5), k->queried = 1;
+            }
+            if (ok && k->launch != 3 && !k->world_sent) {  // (his world, once Player 1's is registered: not in Global)
+                uint8_t w[140];
+                int n = laonline_coop_world_frame(w, sizeof w);
+                if (n) {
+                    uint8_t q[5] = {0x07, 0x5d, 0x4f, 0x41, 0x4c};  // PING world capability, then WORLD
+                    ok = send_frame(k->s, q, 5) && send_frame(k->s, w + 2, n - 2), k->world_sent = 1;
+                }
+            }
+            if (ok && s.sampled_at != k->sent_sample) {  // STATE, then what changed
                 uint8_t b[1 + sizeof(LaoWireState)];
                 b[0] = 0x02;
                 memcpy(b + 1, &s.st, sizeof s.st);

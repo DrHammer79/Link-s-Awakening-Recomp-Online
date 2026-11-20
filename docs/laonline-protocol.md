@@ -354,8 +354,15 @@ u8 count (<= 8)`, then each room: `str code, str title, str description, str hos
 u8 capacity (4), str build, str world, str seed, u8 players (<= 4)`, each `str name, u8 r, g, b, u8 r, g, b, u8 ready,
 u8 host`. The frame ends exactly there. Action 0 answers with the page of rooms; the others with this player's
 room. The client joins only rooms of its own build; a started room is joined straight away (V13 join-in-progress).
-[inferred] (the stand-in, `tools/laonline_relay.py`): 4 places, a name already in the room gets " 2", the host
-leaving hands the room to the next player, an empty room is gone; lobby `room-<code>`, a random password.
+[relay] (LA-Online's relay, V15.2's `server.py`, read 2026-11-18): every request's mode must be 1 or 2 and its build
+15.2 or newer; 4 places; a name once per room (a second join with the same name is refused, unless it brings that
+place's token); the host starts once every member is Ready (no minimum); a member the relay hasn't seen - a request
+with his token, or his name playing in the room's lobby - for 10 s loses Ready, for 2 minutes his place; the host
+leaving hands the room to the next member; an empty room is gone; lobby `V10-<code>` (`.rando` for a Co-op Randomizer
+room), a random password. **A room's lobby admits only the room's members, by name, once it started**
+(`Directory.admit`): anyone else's HELLO there gets `ERROR 5 "Join this session through its room code or public
+listing first."` - so each local player 2..8 takes a place of his own (`runtime/ui/laonline_lobby.mm`). A lobby holds
+`--max-players` (2..8; the developer's Docker setup: 4), Global 100.
 
 ## 6b. Leaderboards (0x32) and Global's player count (0x33) [code]
 
