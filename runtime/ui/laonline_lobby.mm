@@ -42,6 +42,7 @@ using LobbySocket = int;
 #include "plastic.h"  // (the menu's tab colours: the tab row)
 #include "laonline_seed_share.h"
 #include "../laonline_seed_transfer.h"
+#include "../laonline_host.h"  // (the Relay tab: hosting one, the network's search)
 extern "C" {
 #include "../hle/laonline_teleport.h"  // (the teleport button, shown in a started session)
 }
@@ -59,6 +60,10 @@ extern "C" void laonline_launch_mode(int mode);
 extern "C" int laonline_launch_choice(void);
 extern "C" bool laonline_configured(void);
 extern "C" void laonline_lobby_config(char *name, size_t name_cap, char *server, size_t server_cap);
+extern "C" void laonline_set_relay(const char *address);
+extern "C" void laonline_ini_server(char *out, size_t cap);
+extern "C" const char *laonline_official_relay(void);
+extern "C" bool laonline_relay_restart_needed(void);
 extern "C" int game_in_play(void);  // hle/warp.c
 extern bool laonline_avatar_icon(const uint8_t *cap, const uint8_t *hair, ImTextureID *texture, float *aspect);
 
@@ -97,7 +102,7 @@ static Directory g_listing, g_member;
 static Pending g_pending;
 static std::atomic<bool> g_busy(false), g_acting(false);  // a request in flight; one of the player's own (greys out)
 static unsigned g_generation;
-static std::string g_endpoint;  // the relay: laonline.ini's server
+static std::string g_endpoint;  // the relay (laonline.ini's server, or the Relay tab's): the render thread's
 static char g_name[17], g_code[7], g_title[49], g_search[49];
 static int g_filter_mode, g_session_filter, g_sort, g_list_page;
 static bool g_inited, g_browsing, g_launched;  // g_launched: online play started for the room this player is in
@@ -298,6 +303,10 @@ static void request(int action, const std::string &code = "", bool ready = false
         token = g_member.token, epoch = g_generation;
     }
     std::string name = rename ? rename : g_name[0] ? g_name : "Player";
+    if (!rename && g_name[0] && strcmp(g_name, g_settings.laonline_name)) {  // (kept for the next time: Online page's)
+        snprintf(g_settings.laonline_name, sizeof g_settings.laonline_name, "%s", g_name);
+        settings_save();
+    }
     if (action == 3 && token.empty()) token = rejoin_token(code, name);
     std::string title = g_title, search = g_search, address = g_endpoint;
     int filter = g_filter_mode, sort = g_sort;
@@ -613,9 +622,14 @@ static void seed_tick(const Directory &d, const Room &room) {
 
 // Each frame the game draws (menu.mm menu_render): a press made during a poll, the room's poll every 2 s, and the
 // session's start - with the menu open or not.
+static void lan_search(void);  // (the Relay tab's, below)
 extern "C" void laonline_lobby_frame(void) {
     if (!laonline_configured()) return;
     init_once();
+    {   // (test: the Relay tab's network search, once, its finds logged)
+        static bool searched;
+        if (!searched && getenv("LAONLINE_TEST_FIND")) searched = true, lan_search();
+    }
     Directory d;
     Pending run;
     {
@@ -1150,14 +1164,238 @@ static void board_view(float s) {
 }
 
 // The page (menu.mm tabs_body, the bar's Online entry).
-extern "C" void laonline_lobby_draw(float scale) {
-    init_once();
-    if (g_endpoint.empty()) {
-        ImGui::TextWrapped("%s", L("Online sessions need a relay: set server = <address> in laonline.ini, next to the game."));
+// ---------------------------------------------------------------- the Relay tab (LAS Recomp Co-Op's port)
+// Which relay the sessions use: LA-Online's own (always listed, never removable), laonline.ini's, the ones added here
+// (larecomp.ini's laonline_relays: "<name>|<host:port>" each, ';' between), a relay this PC hosts
+// (runtime/laonline_host.cpp) and the ones hosted on this network (its search). The chosen one is larecomp.ini's
+// laonline_relay (laonline.c reads it over laonline.ini's server). Not while online play is on: the relay is the one
+// the session is on.
+struct RelayEntry {
+    std::string name, address;
+    enum Kind { OFFICIAL, INI, ADDED, HOSTED } kind;
+};
+static char g_add_name[25], g_add_address[96], g_host_port_text[8];
+static std::string g_relay_note;  // (the last action's outcome)
+static std::mutex g_lan_lock;     // g_lan
+static std::vector<LaoLanRelay> g_lan;
+static std::atomic<int> g_lan_state(0);  // 0 not searched, 1 searching, 2 done
+
+static std::vector<std::pair<std::string, std::string>> relays_added(void) {
+    std::vector<std::pair<std::string, std::string>> v;
+    std::string all = g_settings.laonline_relays;
+    size_t at = 0;
+    while (at < all.size()) {
+        size_t end = all.find(';', at);
+        if (end == std::string::npos) end = all.size();
+        std::string one = all.substr(at, end - at);
+        size_t bar = one.find('|');
+        if (bar != std::string::npos && bar + 1 < one.size()) v.push_back({one.substr(0, bar), one.substr(bar + 1)});
+        at = end + 1;
+    }
+    return v;
+}
+static bool relays_store(const std::vector<std::pair<std::string, std::string>> &v) {
+    std::string all;
+    for (auto &e : v) all += (all.empty() ? "" : ";") + e.first + "|" + e.second;
+    if (all.size() >= sizeof g_settings.laonline_relays) return false;
+    snprintf(g_settings.laonline_relays, sizeof g_settings.laonline_relays, "%s", all.c_str());
+    settings_save();
+    return true;
+}
+static std::vector<RelayEntry> relay_entries(void) {
+    std::vector<RelayEntry> v;
+    v.push_back({L("LA-Online's relay"), laonline_official_relay(), RelayEntry::OFFICIAL});
+    char ini[96];
+    laonline_ini_server(ini, sizeof ini);
+    if (ini[0] && strcmp(ini, laonline_official_relay())) v.push_back({L("From laonline.ini"), ini, RelayEntry::INI});
+    if (lao_host_running()) v.push_back({L("This PC (hosting)"), "127.0.0.1:" + std::to_string(lao_host_port()), RelayEntry::HOSTED});
+    for (auto &e : relays_added()) v.push_back({e.first, e.second, RelayEntry::ADDED});
+    return v;
+}
+
+// "host", "host:port": a port from 1 to 65535; no spaces, no ';' or '|' (the list's separators)
+static bool relay_address_ok(const std::string &a) {
+    if (a.empty() || a.find_first_of(" ;|\t") != std::string::npos) return false;
+    size_t colon = a.rfind(':');
+    if (colon == std::string::npos) return true;
+    if (colon == 0 || colon + 1 == a.size() || colon + 6 < a.size()) return false;
+    int port = 0;
+    for (size_t i = colon + 1; i < a.size(); i++) {
+        if (a[i] < '0' || a[i] > '9') return false;
+        port = port * 10 + (a[i] - '0');
+    }
+    return port >= 1 && port <= 65535;
+}
+
+static void relay_choose(const std::string &address) {
+    snprintf(g_settings.laonline_relay, sizeof g_settings.laonline_relay, "%s", address.c_str());
+    settings_save();
+    laonline_set_relay(address.c_str());
+    std::lock_guard<std::mutex> lock(g_lock);
+    g_endpoint = address;  // (the sessions there: none of the other relay's)
+    g_listing = Directory(), g_member = Directory(), g_browsing = false;
+}
+
+static bool relay_add(const std::string &name, const std::string &address) {
+    std::string n = name;
+    n.erase(std::remove_if(n.begin(), n.end(), [](char c) { return c == ';' || c == '|'; }), n.end());
+    if (n.empty()) n = address;
+    if (!relay_address_ok(address)) { g_relay_note = L("That address isn't one: a name or IP address, then : and the port (47620 if none)."); return false; }
+    auto v = relays_added();
+    for (auto &e : v)
+        if (e.second == address) { relay_choose(address); return true; }  // (listed already: chosen)
+    v.push_back({n, address});
+    if (!relays_store(v)) { g_relay_note = L("The list is full: remove a relay first."); return false; }
+    relay_choose(address);
+    g_relay_note.clear();
+    return true;
+}
+
+static void lan_search(void) {
+    if (g_lan_state.exchange(1) == 1) return;
+    std::thread([] {
+        std::vector<LaoLanRelay> found = lao_lan_find(1500);
+        { std::lock_guard<std::mutex> lock(g_lan_lock); g_lan = found; }
+        LOG("[laonline] network search: %d relay(s)\n", (int)found.size());
+        for (auto &r : found) LOG("[laonline] network relay %s '%s' (%d playing)\n", r.address.c_str(), r.name.c_str(), r.players);
+        g_lan_state = 2;
+    }).detach();
+}
+
+static void host_toggle(bool on) {
+    if (!on) {
+        bool was_chosen = g_endpoint == "127.0.0.1:" + std::to_string(lao_host_port());
+        lao_host_stop();
+        if (was_chosen) {  // (back to the relay before: laonline.ini's, else LA-Online's)
+            char ini[96];
+            laonline_ini_server(ini, sizeof ini);
+            relay_choose(ini[0] ? ini : laonline_official_relay());
+        }
+        g_relay_note = L("Stopped hosting.");
         return;
     }
+    int port = atoi(g_host_port_text);
+    std::string error;
+    if (!lao_host_start(port, g_name[0] ? g_name : "LAS Recomp", error)) { g_relay_note = L(error.c_str()); return; }
+    g_settings.laonline_host_port = port;
+    settings_save();
+    relay_choose("127.0.0.1:" + std::to_string(port));
+    g_relay_note.clear();
+}
+
+static void relay_view(const Directory &d, float s) {
+    bool locked = in_room_of(d) || g_launched || laonline_launch_choice() != 0;
+    if (!g_host_port_text[0]) snprintf(g_host_port_text, sizeof g_host_port_text, "%d", g_settings.laonline_host_port);
+    ImGui::TextWrapped("%s", L("A relay connects the players of a session. Use LA-Online's, add another by its address, "
+                               "host one on this PC, or find one on your network."));
+    if (locked) ImGui::TextDisabled("%s", L("Leave the session to change the relay."));
+    ImGui::BeginDisabled(locked);
+    ImGui::SeparatorText(L("Relay"));
+    std::vector<RelayEntry> entries = relay_entries();
+    int remove = -1, i = 0;
+    for (const RelayEntry &e : entries) {
+        ImGui::PushID(i++);
+        bool known = !e.address.empty();
+        bool chosen = known && e.address == g_endpoint;
+        ImGui::BeginDisabled(!known);
+        if (ImGui::RadioButton(e.name.c_str(), chosen) && !chosen) relay_choose(e.address);
+        ImGui::EndDisabled();
+        ImGui::SameLine(320 * s);
+        ImGui::TextDisabled("%s", known ? e.address.c_str() : L("(its address comes with an update)"));
+        if (e.kind == RelayEntry::ADDED) {
+            ImGui::SameLine(640 * s);
+            if (ImGui::SmallButton(L("Remove"))) remove = i - 1;
+        }
+        ImGui::PopID();
+    }
+    if (remove >= 0) {
+        std::string gone = entries[remove].address;
+        auto v = relays_added();
+        v.erase(std::remove_if(v.begin(), v.end(), [&](auto &e) { return e.second == gone; }), v.end());
+        relays_store(v);
+        if (gone == g_endpoint) {
+            char ini[96];
+            laonline_ini_server(ini, sizeof ini);
+            relay_choose(ini[0] ? ini : laonline_official_relay());
+        }
+    }
+
+    ImGui::SeparatorText(L("Add a relay"));
+    ImGui::SetNextItemWidth(220 * s);
+    ImGui::InputTextWithHint("##relayname", L("Name (optional)"), g_add_name, sizeof g_add_name);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(400 * s);
+    bool enter = ImGui::InputTextWithHint("##relayaddress", L("Address, e.g. 203.0.113.5:47620"), g_add_address,
+                                          sizeof g_add_address, ImGuiInputTextFlags_CharsNoBlank | ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    if ((ImGui::Button(L("Add")) || enter) && g_add_address[0] && relay_add(g_add_name, g_add_address))
+        g_add_name[0] = g_add_address[0] = 0;
+
+    ImGui::SeparatorText(L("On your network"));
+    int lan = g_lan_state.load();
+    ImGui::BeginDisabled(lan == 1);
+    if (ImGui::Button(lan == 1 ? L("Searching...") : L("Find relays on your network"))) lan_search();
+    ImGui::EndDisabled();
+    if (lan == 2) {
+        std::vector<LaoLanRelay> found;
+        { std::lock_guard<std::mutex> lock(g_lan_lock); found = g_lan; }
+        if (found.empty()) ImGui::TextDisabled("%s", L("None found. The host's PC must be hosting, on the same network."));
+        int j = 0;
+        for (const LaoLanRelay &r : found) {
+            ImGui::PushID(1000 + j++);
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("%s", r.name.c_str());
+            ImGui::SameLine(320 * s);
+            ImGui::TextDisabled(L("%s  (%d connected)"), r.address.c_str(), r.players);
+            ImGui::SameLine(0, 16 * s);  // (after it: the address and count can run past the Remove column)
+            if (lao_host_running() && r.address == "127.0.0.1:" + std::to_string(lao_host_port()))
+                ImGui::TextDisabled("%s", L("(this PC's)"));  // (listed above already: This PC)
+            else if (ImGui::SmallButton(L("Use"))) relay_add(r.name + " (LAN)", r.address);
+            ImGui::PopID();
+        }
+    }
+
+    ImGui::SeparatorText(L("Host a relay on this PC"));
+    bool hosting = lao_host_running();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(L("Port"));
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(100 * s);
+    ImGui::BeginDisabled(hosting);
+    ImGui::InputText("##hostport", g_host_port_text, sizeof g_host_port_text, ImGuiInputTextFlags_CharsDecimal);
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button(hosting ? L("Stop hosting") : L("Start hosting"), ImVec2(200 * s, 0))) host_toggle(!hosting);
+    ImGui::SameLine();
+    if (ImGui::Checkbox(L("Host whenever the game starts"), &g_settings.laonline_host)) settings_save();
+    if (hosting) {
+        int port = lao_host_port(), n = lao_host_players();
+        ImGui::Text(L("Hosting on port %d: %d connected."), port, n);
+        static std::string mine;  // (this PC's addresses: looked up once a hosting port is known, not each frame)
+        static int mine_port;
+        if (mine_port != port) {
+            mine.clear(), mine_port = port;
+            for (const std::string &a : lao_host_addresses()) mine += (mine.empty() ? "" : ",  ") + a + ":" + std::to_string(port);
+        }
+        if (!mine.empty()) ImGui::TextWrapped(L("On your network the others add %s (or find it with the search)."), mine.c_str());
+        ImGui::TextWrapped(L("Over the internet: forward TCP port %d on your router to this PC, and give the others "
+                             "your public IP address with :%d. Windows may ask to let LAS Recomp through its firewall."),
+                           port, port);
+    }
+    ImGui::EndDisabled();
+    if (!g_relay_note.empty()) ImGui::TextWrapped("%s", g_relay_note.c_str());
+    if (laonline_relay_restart_needed())
+        ImGui::TextWrapped("%s", L("Restart the game to play online: online play starts with the game."));
+}
+
+extern "C" void laonline_lobby_draw(float scale) {
+    init_once();
     Directory d;
     { std::lock_guard<std::mutex> lock(g_lock); d = g_member; }
+    if (g_endpoint.empty() || !laonline_configured()) {  // (no relay yet, or online play not set up as the game started)
+        relay_view(d, scale);
+        return;
+    }
     if (in_room_of(d)) { room_view(d, scale); return; }  // (in a session: its room alone)
     static const char *test_tab = getenv("LAONLINE_TEST_TAB");  // (test: global | board - the page opens on that tab)
     static bool tab_once;
@@ -1176,6 +1414,7 @@ extern "C" void laonline_lobby_draw(float scale) {
         }
         if (ImGui::BeginTabItem(L("Global"), NULL, first("global"))) { global_view(scale); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem(L("Leaderboards"), NULL, first("board"))) { board_view(scale); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem(L("Relay"), NULL, first("relay"))) { relay_view(d, scale); ImGui::EndTabItem(); }
         tab_once = true;
         ImGui::EndTabBar();
     }

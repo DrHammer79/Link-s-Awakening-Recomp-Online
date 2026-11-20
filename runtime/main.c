@@ -332,6 +332,8 @@ static const char *const HELP =
     "                         needed), the game code, the shaders. Prints \"progress <0-1> <step>\" lines;\n"
     "                         exit code 0 when ready to play, 1 after an \"error <why>\" line, 3 cancelled\n"
     "  --list-settings        print the settings (larecomp.ini keys and values) and exit\n"
+    "  --relay [port] [max]   run only an online relay (LA-Online's rules), no game, until stopped: on port\n"
+    "                         47620 unless given, max players per lobby 4 unless given; its log on stdout\n"
     "  --no-update-check      no update check or update this run (LARECOMP_NO_UPDATE_CHECK=1)\n"
     "  --version              print the version and exit\n"
     "  --help                 print this and exit\n";
@@ -458,6 +460,14 @@ static int cli_options(int argc, char **argv, bool *list, bool *prepare) {
                                    !strcmp(a, "--new-data-dir") ? "LARECOMP_NEW_DATA_DIR" : "LARECOMP_GAME_FILES");
         }
         else if (!strcmp(a, "--load-save") || !strcmp(a, "--build-ios")) i++;  // (main(): their argument)
+        else if (!strcmp(a, "--relay")) {  // (LAS Recomp Co-Op: a relay alone - runtime/laonline_host.cpp)
+            extern int lao_host_main(int port, int max_players, void (*print)(const char *text));
+            int port = 47620, max = 4;
+            if (next && *next >= '0' && *next <= '9') port = atoi(argv[++i]);
+            if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') max = atoi(argv[++i]);
+            rt_cli_init();
+            cli_exit(lao_host_main(port, max, rt_cli_print));
+        }
     }
     return -1;
 }

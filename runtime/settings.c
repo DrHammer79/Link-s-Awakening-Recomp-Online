@@ -92,6 +92,7 @@ Settings g_settings = {
     .laonline_markers = true, .laonline_hearts = true, .laonline_indicators = true,
     .laonline_feed = true, .laonline_feed_seconds = 10, .laonline_minimap = true, .laonline_dungeon_minimap = true,
     .laonline_death_notices = true,
+    .laonline_host_port = 47620,
     .laonline_tracker_x = 2, .laonline_tracker_y = 65, .laonline_tracker_opacity = 80, .laonline_tracker_size = 1,
     .laonline_shared_items = true, .laonline_pickup_notifications = true, .laonline_collection_counters = true,
     .laonline_sync_story = true, .laonline_sync_supplies = true, .laonline_sync_keys = true,
@@ -230,7 +231,8 @@ void settings_resolve_defaults(bool integrated) {
 
 // Keys whose value may be empty (the rest: a line without one is skipped)
 static bool value_optional(const char *key) {
-    return !strcmp(key, "rando_seed") || !strcmp(key, "rando_last") || !strcmp(key, "cosmetics_seed");
+    return !strcmp(key, "rando_seed") || !strcmp(key, "rando_last") || !strcmp(key, "cosmetics_seed") ||
+           !strcmp(key, "laonline_relay") || !strcmp(key, "laonline_relays") || !strcmp(key, "laonline_name");
 }
 
 // The online settings (LA-Online), one row each: the ini key, the field, and its range - a value out of it, or not a
@@ -254,6 +256,7 @@ static const struct { const char *key; size_t at; bool is_bool; int lo, hi; } k_
     ONLINE_BOOL(laonline_sync_story), ONLINE_BOOL(laonline_sync_supplies), ONLINE_BOOL(laonline_sync_keys),
     ONLINE_BOOL(laonline_sync_upgrades), ONLINE_BOOL(laonline_sync_souls), ONLINE_BOOL(laonline_sync_world),
     ONLINE_INT(laonline_teleport_key, 0, 7),  // (LAO_TP_KEY_*: 0 automatic)
+    ONLINE_BOOL(laonline_host), ONLINE_INT(laonline_host_port, 1, 65535),
 };
 #undef ONLINE_BOOL
 #undef ONLINE_INT
@@ -293,6 +296,9 @@ static bool settings_apply(const char *key, const char *val) {
         strlcpy(g_settings.cosmetics_seed, val, sizeof g_settings.cosmetics_seed);
         return true;
     }
+    if (!strcmp(key, "laonline_relay")) { strlcpy(g_settings.laonline_relay, val, sizeof g_settings.laonline_relay); return true; }
+    if (!strcmp(key, "laonline_relays")) { strlcpy(g_settings.laonline_relays, val, sizeof g_settings.laonline_relays); return true; }
+    if (!strcmp(key, "laonline_name")) { strlcpy(g_settings.laonline_name, val, sizeof g_settings.laonline_name); return true; }
     if (!strcmp(key, "aspect")) g_settings.aspect = !strcmp(val, "original") ? ASPECT_ORIGINAL : ASPECT_UNLOCKED;
     else if (!strcmp(key, "fullscreen")) g_settings.fullscreen = atoi(val) != 0;
     else if (!strcmp(key, "volume")) g_settings.volume = (float)atof(val);
@@ -633,13 +639,13 @@ void settings_load(void) {
     parse_overrides();
     FILE *f = fopen(SETTINGS_FILE, "r");
     if (f) {
-        char line[256];
+        char line[1280];  // (laonline_relays: up to 1023 characters)
         bool tip_key = false, aspect_key = false;
         while (fgets(line, sizeof line, f)) {
             line[strcspn(line, "\r\n")] = 0;
             char key[64];
-            char val[128] = {0};
-            int fields = sscanf(line, " %63[^= ] = %127[^\n]", key, val);
+            char val[1100] = {0};
+            int fields = sscanf(line, " %63[^= ] = %1099[^\n]", key, val);
             if (fields < 1) continue;
             int o = find_override(key);
             if (o >= 0) str_add(&g_ovr[o].file_lines, line);  // (kept for settings_save)
@@ -778,6 +784,9 @@ static void write_settings(FILE *f) {
     fprintf(f, "screen_filter = %s\n", k_screen_filter_keys[g_settings.screen_filter]);
     fprintf(f, "weather = %s\n", k_weather_keys[g_settings.weather]);
     if (g_settings.cosmetics_seed[0]) fprintf(f, "cosmetics_seed = %s\n", g_settings.cosmetics_seed);
+    if (g_settings.laonline_relay[0]) fprintf(f, "laonline_relay = %s\n", g_settings.laonline_relay);
+    if (g_settings.laonline_relays[0]) fprintf(f, "laonline_relays = %s\n", g_settings.laonline_relays);
+    if (g_settings.laonline_name[0]) fprintf(f, "laonline_name = %s\n", g_settings.laonline_name);
     bind_settings_save(f);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
     if (g_settings.rando_last[0]) fprintf(f, "rando_last = %s\n", g_settings.rando_last);

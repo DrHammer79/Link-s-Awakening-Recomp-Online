@@ -387,12 +387,19 @@ static void zoom_options(bool coop) {
     opt_indent(-1);
 }
 
-// Online play (shown while it is set up: laonline.ini names a relay): the teleport button, and how-tos - each row's
-// description is the guide (runtime/ui/laonline_teleport.mm, the picker; runtime/hle/laonline_teleport.h)
+// Online play: how to start (always), then while it is set up (a relay known as the game started) the teleport button
+// and its how-tos - each row's description is the guide (runtime/ui/laonline_lobby.mm, the Online page and its Relay
+// tab; runtime/ui/laonline_teleport.mm, the picker; runtime/hle/laonline_teleport.h)
 extern "C" bool laonline_configured(void);  // (runtime/hle/laonline.c: online play set up)
 static void online_options(void) {
-    if (!laonline_configured()) return;
     opt_section("Online");
+    opt_link("How to: play online",
+             "Open the menu's Online page. Sessions: host one (a room code to give your friends) or join one by its code "
+             "or from the public list; everyone presses Ready and the host starts. Relay (the server that connects you): "
+             "use LA-Online's, add a friend's by its address (like 203.0.113.5:47620), find one on your network, or host "
+             "one on this PC - your friends then add your address. Over the internet the host forwards the relay's TCP "
+             "port on the router. Local co-op players join the session with you.");
+    if (!laonline_configured()) return;
     static const char *const keys[LAO_TP_KEY_COUNT] = {"Automatic", "D-pad Up", "D-pad Down", "D-pad Left", "D-pad Right",
                                                        "Minus + D-pad Up", "Minus + D-pad Down", "Off"};
     bool dpad_free = g_settings.dpad_mode == DPAD_NOTHING;

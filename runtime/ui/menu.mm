@@ -118,12 +118,12 @@ static void set_open(bool open);
 // launcher.mm's.
 // (Cosmetics and Cheats left the Settings tabs for entries of their own: Cosmetics by Settings, Cheats by the Save
 // Editor - user 2026-11-11)
-// (Online: LA-Online's sessions, runtime/ui/laonline_lobby.mm - an entry only while online play is set up: bar_shown)
+// (Online: LA-Online's sessions, runtime/ui/laonline_lobby.mm - always an entry: its Relay tab sets online play up)
 enum { BAR_SETTINGS, BAR_COSMETICS, BAR_RANDO, BAR_WARP, BAR_EDITOR, BAR_CHEATS, BAR_ONLINE, BAR_RESET, BAR_QUIT, BAR_CLOSE, BAR_N };
 extern "C" bool laonline_configured(void);           // hle/laonline.c
 extern "C" void laonline_lobby_draw(float scale);    // laonline_lobby.mm
 extern "C" void laonline_lobby_frame(void);
-static bool bar_shown(int e) { return e != BAR_ONLINE || laonline_configured(); }
+static bool bar_shown(int e) { (void)e; return true; }
 static std::atomic<int> g_page{-1};  // the entry whose page is open (-1: the bar alone)
 static int g_bar_cur;  // the bar's cursor (render thread)
 static void page_open(int page);

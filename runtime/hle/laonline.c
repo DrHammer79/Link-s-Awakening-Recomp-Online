@@ -150,7 +150,16 @@ static void set_kv(const char *k, const char *v) {
     else if (!strcmp(k, "puppet_type")) g_cfg.type = (int)strtol(v, NULL, 0);
 }
 
+static void load_config_locked(void);
+static char g_ini_server[96];  /* (LAS Recomp Co-Op's port: laonline.ini's own relay, whatever the game chose) */
+static pthread_mutex_t g_server_lock = PTHREAD_MUTEX_INITIALIZER;  /* (g_cfg.server: the game can change it) */
 static void load_config(void) {
+    pthread_mutex_lock(&g_server_lock);
+    load_config_locked();
+    pthread_mutex_unlock(&g_server_lock);
+}
+static void load_config_locked(void) {
+    g_cfg.server[0] = 0;  /* (laonline.ini's, else none: not the one chosen in the game, below - g_ini_server) */
     FILE *f = fopen("laonline.ini", "r");
     if (f) {
         char line[768];
@@ -166,6 +175,13 @@ static void load_config(void) {
         }
         fclose(f);
     }
+    /* LAS Recomp Co-Op's port: the relay and name chosen in the game (the Online page: larecomp.ini) over
+     * laonline.ini's - which is kept, as one of the page's relays (laonline_ini_server) */
+    snprintf(g_ini_server, sizeof g_ini_server, "%s", g_cfg.server);
+    if (!g_cfg.server[0]) set_kv("server", LAO_OFFICIAL_RELAY);  /* (none named: LA-Online's own) */
+    settings_load();  /* (once: at boot, laonline_configured is first) */
+    if (g_settings.laonline_relay[0]) set_kv("server", g_settings.laonline_relay);
+    if (g_settings.laonline_name[0]) set_kv("name", g_settings.laonline_name);
     if (ENV("LAONLINE_MODE")) set_kv("mode", ENV("LAONLINE_MODE"));
     if (ENV("LAONLINE_PEER")) set_kv("peer", ENV("LAONLINE_PEER"));
     if (ENV("LAONLINE_PORT")) set_kv("port", ENV("LAONLINE_PORT"));
@@ -176,12 +192,39 @@ static void load_config(void) {
     if (ENV("LAONLINE_LOBBY")) set_kv("lobby", ENV("LAONLINE_LOBBY")), g_lobby_named = 1;  // (joined at once: above)
 }
 
-// (LAS Recomp Co-Op's port) the name and relay the menu's Online page starts from: laonline.ini's, or the environment's
-// (read at boot by laonline_configured, before the other threads start: not read again here, under the network thread)
+// (LAS Recomp Co-Op's port) the name and relay the menu's Online page starts from: laonline.ini's, the Relay tab's, or
+// the environment's (under g_server_lock: the Relay tab can change the relay - laonline_set_relay)
 void laonline_lobby_config(char *name, size_t name_cap, char *server, size_t server_cap) {
+    pthread_mutex_lock(&g_server_lock);
     snprintf(name, name_cap, "%s", g_cfg.name);
     snprintf(server, server_cap, "%s", g_cfg.server);
+    pthread_mutex_unlock(&g_server_lock);
 }
+
+// (LAS Recomp Co-Op's port) the relays: the one in use as host and port (47620 when it names none), read for each
+// connection; the one chosen on the Online page's Relay tab (runtime/ui/laonline_lobby.mm: also kept in larecomp.ini,
+// which load_config reads over laonline.ini); laonline.ini's own; LA-Online's (LAO_OFFICIAL_RELAY: its address once
+// its developer gives it - none yet, so laonline.ini's is the one until then).
+static void relay_address(char *host, size_t hn, char *port, size_t pn) {
+    pthread_mutex_lock(&g_server_lock);
+    snprintf(host, hn, "%s", g_cfg.server);
+    pthread_mutex_unlock(&g_server_lock);
+    snprintf(port, pn, "47620");
+    char *colon = strrchr(host, ':');
+    if (colon) *colon = 0, snprintf(port, pn, "%s", colon + 1);
+}
+void laonline_set_relay(const char *address) {
+    pthread_mutex_lock(&g_server_lock);
+    snprintf(g_cfg.server, sizeof g_cfg.server, "%s", address);
+    pthread_mutex_unlock(&g_server_lock);
+    LOG("[laonline] relay: %s\n", address[0] ? address : "(none)");
+}
+void laonline_ini_server(char *out, size_t cap) {
+    pthread_mutex_lock(&g_server_lock);
+    snprintf(out, cap, "%s", g_ini_server);
+    pthread_mutex_unlock(&g_server_lock);
+}
+const char *laonline_official_relay(void) { return LAO_OFFICIAL_RELAY; }
 
 // ---------------------------------------------------------------- network (non-blocking UDP, polled on the game thread)
 static sock_t g_sock = BAD_SOCK;
@@ -1076,7 +1119,7 @@ static int seed_metadata_request(const char *folder,char *id,size_t idcap,char *
 #ifdef _WIN32
  WSADATA data;if(WSAStartup(MAKEWORD(2,2),&data))return 0;
 #endif
- char host[96],port[16]="47620";snprintf(host,sizeof host,"%s",g_cfg.server);char *colon=strrchr(host,':');if(colon){*colon=0;snprintf(port,sizeof port,"%s",colon+1);}
+ char host[96],port[16];relay_address(host,sizeof host,port,sizeof port);
  struct addrinfo hints={0},*address=NULL;hints.ai_family=AF_INET;hints.ai_socktype=SOCK_STREAM;
  if(getaddrinfo(host,port,&hints,&address)||!address)goto done;
  sock=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(sock==BAD_SOCK){freeaddrinfo(address);goto done;}
@@ -1125,10 +1168,7 @@ int laonline_seed_descriptor_named(char *id,size_t idcap,char *world,size_t worl
 int laonline_relay_login(char *host, size_t hn, char *port, size_t pn, char *name, char *lobby, char *password) {
     int launch = atomic_load(&g_launch_online);
     if (g_cfg.mode != M_SERVER || launch < 1 || launch > 3) return 0;
-    snprintf(host, hn, "%s", g_cfg.server);
-    snprintf(port, pn, "47620");
-    char *colon = strrchr(host, ':');
-    if (colon) *colon = 0, snprintf(port, pn, "%s", colon + 1);
+    relay_address(host, hn, port, pn);
     char login_lobby[33];
     room_login(name, login_lobby, password);
     if (launch == 3) snprintf(lobby, 33, "%s", laonline_v12_global_lobby()), password[0] = 0;
@@ -1144,12 +1184,12 @@ static void *srv_thread(void *arg) {
     WSAStartup(MAKEWORD(2, 2), &w);
 #endif
     char host[96], port[16] = "47620";
-    snprintf(host, sizeof host, "%s", g_cfg.server);
-    char *colon = strrchr(host, ':');
-    if (colon) *colon = 0, snprintf(port, sizeof port, "%s", colon + 1);
     for (;;) {
         while (!atomic_load(&g_launch_online)) sleep_ms(50);
         int launch_epoch=atomic_load(&g_launch_epoch);
+        /* LAS Recomp Co-Op's port: the relay read for each connection - it can be another one chosen in the game
+         * (laonline_set_relay), not only laonline.ini's at startup */
+        relay_address(host, sizeof host, port, sizeof port);
         srv_clear();
         g_srv_status = 0;
         relay_on_set(NULL);  /* LAS Recomp Co-Op's port: no lobby until this connection's WELCOME */
@@ -1480,15 +1520,31 @@ static void launch_from_config(void) {
 // out once, by main.c at boot before the other threads start (after rt_paths_init: the data root's laonline.ini).
 // g_laonline_on is the same, for the game code's patches (tools/patches.py: a load, not a call, on paths every actor
 // takes - each animation played).
+// (LAS Recomp Co-Op's port: a relay chosen on the Online page's Relay tab counts, and hosting one - which starts here)
 bool g_laonline_on;
+static bool g_relay_at_boot;
 bool laonline_configured(void) {
     static int known = -1;
     if (known < 0) {
         load_config();
-        known = g_cfg.mode != M_OFF || g_cfg.server[0];
+        if (g_settings.laonline_host) {  // ("Host whenever the game starts": runtime/laonline_host.cpp)
+            extern bool lao_host_start_c(int port, const char *name);
+            lao_host_start_c(g_settings.laonline_host_port, g_cfg.name);
+        }
+        known = g_cfg.mode != M_OFF || g_cfg.server[0] || g_settings.laonline_host;
+        g_relay_at_boot = known;
         g_laonline_on = known;
     }
     return known;
+}
+// A relay chosen when online play wasn't set up as the game started: online play needs a restart (what it sets up is
+// set up as the game starts - laonline_configured's callers)
+bool laonline_relay_restart_needed(void) {
+    char server[96];
+    pthread_mutex_lock(&g_server_lock);
+    snprintf(server, sizeof server, "%s", g_cfg.server);
+    pthread_mutex_unlock(&g_server_lock);
+    return !g_relay_at_boot && server[0];
 }
 
 void laonline_tick(Cpu *c, uint64_t frame) {

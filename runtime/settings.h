@@ -148,6 +148,14 @@ typedef struct {
     bool laonline_sync_world;  // picked-up items, opened pots and cut item bushes (Co-op Randomizer)
     // (LAS Recomp Co-Op) the button that opens the teleport picker (runtime/ui/laonline_teleport.mm): LAO_TP_KEY_*
     int laonline_teleport_key;
+    // (LAS Recomp Co-Op) online play's relay chosen in the game (runtime/ui/laonline_lobby.mm: empty = laonline.ini's),
+    // the relays added there ("<name>|<host:port>" each, ';' between), and the name the others see (empty: laonline.ini's)
+    char laonline_relay[96];
+    char laonline_relays[1024];
+    char laonline_name[17];
+    // (LAS Recomp Co-Op) a relay hosted by this PC (runtime/laonline_host.cpp): whenever the game starts; its port
+    bool laonline_host;
+    int laonline_host_port;
     bool diff_ohko;      // any hit kills
     bool diff_hero;      // Hero Mode flag forced on in the loaded save (2x damage, no recovery hearts)
     // cosmetics (Cosmetics tab, runtime/ui/menu.mm), live, never part of a seed: colour rows of the shared palette

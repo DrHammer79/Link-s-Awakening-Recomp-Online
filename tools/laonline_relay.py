@@ -15,7 +15,9 @@ to newcomers; the first joiner sets a lobby's password and seed. A test tool, no
 
 Clients: laonline.ini `mode = server`, `server = 127.0.0.1:<port>` (default port 47620). Logs one line per event on
 stdout ("join", "leave", "flag", "item", "pickup", "reward", ...), which the tests read. Python 3.8+, standard
-library only. Ctrl+C stops it. With LAO_RELAY set to the folder of LA-Online's own relay it runs that one instead,
+library only. Ctrl+C stops it. With LAO_NATIVE_RELAY=1 it runs the game's own relay instead (`lasrecomp --relay`,
+runtime/laonline_host.cpp: the one the Online page's Relay tab hosts - the same log lines). With LAO_RELAY set to the
+folder of LA-Online's own relay it runs that one instead,
 with these log lines (tools/laonline_real_relay.py).
 """
 import asyncio
@@ -378,6 +380,8 @@ def session(b):
         listed.sort(key=keys[sort if sort < 4 else 0])
         return ok('', listed=listed[page * 8:page * 8 + 8], total=len(listed), pg=page)
     if action in (1, 2):
+        if len(rooms) >= 256:
+            return fail('The room directory is busy. Please try again later.')
         if token and any(m.token == token for r in rooms.values() for m in r.members):
             return fail('Leave your current session before creating another.')
         r = Room(new_code(), title or name + b"'s adventure", name, mode, action == 2, build, world, seed)
@@ -543,7 +547,7 @@ async def client(reader, writer):
     p = Player(writer)
     try:
         while True:
-            head = await reader.readexactly(2)
+            head = await asyncio.wait_for(reader.readexactly(2), 60 if p.lobby is not None else 15)  # (silent: gone)
             (n,) = struct.unpack('<H', head)
             if n == 0:
                 continue
@@ -564,7 +568,7 @@ async def client(reader, writer):
                 await writer.drain()
                 break
             await writer.drain()
-    except (asyncio.IncompleteReadError, ConnectionError, struct.error, IndexError):
+    except (asyncio.IncompleteReadError, asyncio.TimeoutError, ConnectionError, struct.error, IndexError):
         pass
     finally:
         if p.lobby is not None and p.lobby.players.get(p.id) is p:
@@ -583,7 +587,52 @@ async def main():
         await server.serve_forever()
 
 
+def native(args):
+    """The game's own relay (lasrecomp --relay), its lines passed on. Run as build/larelay.exe, a copy (beside the
+    build's DLLs): tools/coop_tests/run_test.sh stops the checkout's lasrecomp processes after each game it runs. Tied to
+    this process (a job object that ends with it), so that stopping it - the tests' kill - stops the relay too."""
+    import shutil
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    exe, copy = os.path.join(root, 'build', 'lasrecomp.exe'), os.path.join(root, 'build', 'larelay.exe')
+    if not os.path.exists(copy) or os.path.getmtime(copy) < os.path.getmtime(exe):
+        shutil.copy2(exe, copy)
+    env = dict(os.environ, LAONLINE_HOST_BIND='127.0.0.1')  # (as the stand-in: this PC only - no firewall asks)
+    ucrt = 'C:/msys64/ucrt64/bin'  # (the dev build's DLLs, as tools/coop_tests/run_test.sh puts them on PATH)
+    if os.name == 'nt' and os.path.isdir(ucrt):
+        env['PATH'] = ucrt + os.pathsep + env.get('PATH', '')
+    child = subprocess.Popen([copy, '--relay'] + args, env=env)
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes
+        k = ctypes.WinDLL('kernel32', use_last_error=True)
+        k.CreateJobObjectW.restype = wintypes.HANDLE
+        k.OpenProcess.restype = wintypes.HANDLE
+
+        class Limits(ctypes.Structure):  # JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+            _fields_ = [('PerProcessUserTimeLimit', ctypes.c_int64), ('PerJobUserTimeLimit', ctypes.c_int64),
+                        ('LimitFlags', wintypes.DWORD), ('MinimumWorkingSetSize', ctypes.c_size_t),
+                        ('MaximumWorkingSetSize', ctypes.c_size_t), ('ActiveProcessLimit', wintypes.DWORD),
+                        ('Affinity', ctypes.c_size_t), ('PriorityClass', wintypes.DWORD),
+                        ('SchedulingClass', wintypes.DWORD), ('Io', ctypes.c_uint64 * 6),
+                        ('ProcessMemoryLimit', ctypes.c_size_t), ('JobMemoryLimit', ctypes.c_size_t),
+                        ('PeakProcessMemoryUsed', ctypes.c_size_t), ('PeakJobMemoryUsed', ctypes.c_size_t)]
+        job = k.CreateJobObjectW(None, None)
+        limits = Limits()
+        limits.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        k.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits))  # (9: extended limits)
+        handle = k.OpenProcess(0x1F0FFF, False, child.pid)
+        k.AssignProcessToJobObject(job, handle)
+    try:
+        return child.wait()
+    except KeyboardInterrupt:
+        child.kill()
+        return 0
+
+
 if __name__ == '__main__':
+    if os.environ.get('LAO_NATIVE_RELAY'):  # (the game's own relay: runtime/laonline_host.cpp)
+        sys.exit(native(sys.argv[1:]))
     if os.environ.get('LAO_RELAY'):  # (LA-Online's own relay instead, with these log lines: tools/laonline_real_relay.py)
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import laonline_real_relay

@@ -11,3 +11,7 @@
 #define LAO_ROOM_BUILD LAO_MOD_VERSION
 #define LAO_LAS_BASELINE "v0.6.0"
 #define LAO_RELEASE_LABEL "LAS Recomp v0.6.0 + local co-op, LA-Online V16.0"
+/* LA-Online's own relay ("host:port"): always on the Online page's Relay tab, never removable, the one used when
+ * laonline.ini names none. Empty until its developer gives its public address (the tab says it comes with an update);
+ * until then laonline.ini's server, or a relay added or hosted on that tab. */
+#define LAO_OFFICIAL_RELAY ""

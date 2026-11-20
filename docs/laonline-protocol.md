@@ -403,6 +403,14 @@ by path and sha256 - no game file travels), the seed's own small files (`setting
 they are. The receiver rebuilds the seed from its own game files and checks each file's sha256 and the whole world's
 checksum; an exact world already there is reused.
 
+## 6d. Finding relays on the network (UDP, LAS Recomp Co-Op) [code]
+
+Not LA-Online's: the Online page's Relay tab (`runtime/laonline_host.cpp`). A game hosting a relay listens on UDP port
+47620 (whatever TCP port its relay is on) for the 8 bytes `LAOFIND1`, and answers the sender with `LAOHOST1`, u16 the
+relay's TCP port, u8 how many are connected to it, str the host's name (u8 length, at most 32). The search sends
+`LAOFIND1` to 255.255.255.255, to each of the PC's networks' broadcast addresses and to 127.0.0.1, and lists what
+answers within 1.5 s (an answer from one of the PC's own addresses as 127.0.0.1).
+
 ## 7. Server behaviour the client expects
 
 | # | Behaviour | Basis |

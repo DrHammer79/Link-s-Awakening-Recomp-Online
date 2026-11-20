@@ -262,3 +262,40 @@ they stand (`warp_request_place`); co-op brings the local players along. Refused
 cards says why): Player 1 not free to move (co-op's event check, `coop_p1_free`), the area loading, either side in a
 boss's arena (`rt_boss_arena_at`, the Escape Bottle's table), the teammate knocked out or somewhere without an arrival
 point. `runtime/ui/laonline_teleport.mm`, `runtime/hle/laonline_teleport.h`; `tools/coop_tests/online_teleport.sh`.
+
+## Relays: choosing one, adding one, hosting one (2026-11-20, new)
+
+The Online page has a **Relay** tab. It is always there, also when online play isn't set up yet (no laonline.ini).
+
+- **The list.** LA-Online's own relay is always first and can't be removed (its address comes with an update: until
+  then it's shown greyed out). Then laonline.ini's relay (its `server`), if it names another, then a relay this PC
+  hosts, then the ones added here. The chosen one is saved in larecomp.ini (`laonline_relay`) and used over
+  laonline.ini's; the added ones too (`laonline_relays`: `<name>|<host:port>` each, `;` between). `LAONLINE_SERVER`
+  still wins over both (the tests).
+- **Add a relay**: a name (optional) and its address, `host:port` (47620 when no port is given). It's added and
+  chosen. Remove takes it off the list (only the added ones have Remove).
+- **On your network**: "Find relays on your network" asks every network this PC is on (UDP broadcast, port 47620:
+  `LAOFIND1`; a hosting game answers `LAOHOST1`, its TCP port, how many are connected and the host's name) and lists
+  what answers within 1.5 s. Use adds and chooses one.
+- **Host a relay on this PC** (runtime/laonline_host.cpp): the game runs a relay itself, on the port given (47620 by
+  default), and chooses it. Its rules are LA-Online's relay's, as the stand-in's (tools/laonline_relay.py): rooms of 4,
+  session lobbies only for their members once started, a name once per lobby, PvP's rate limits, Global and the
+  leaderboards (kept while it runs), a Co-op Randomizer room's seed. The tab then shows this PC's addresses for the
+  others on its network, and what the others over the internet need: TCP port forwarded on the router to this PC, and
+  the public IP address. Windows asks once to let LAS Recomp through its firewall. "Host whenever the game starts"
+  keeps it on (`laonline_host`, `laonline_host_port`).
+- **A relay alone**: `lasrecomp --relay [port] [max players]` runs only the relay (no window, no game files), its log
+  lines on stdout - a dedicated relay for a PC that doesn't play.
+
+The relay can't change while a session is on: the tab says to leave it first. A relay chosen when online play wasn't
+set up at all when the game started needs a restart (online play is set up as the game starts: laonline_configured).
+
+Tests: `tools/coop_tests/online_host.sh` (a game hosting, another finding it and joining a session on it), and every
+online test against the game's relay instead of the stand-in with `LAO_NATIVE_RELAY=1` (tools/laonline_relay.py then
+runs `build/lasrecomp.exe --relay`).
+
+What the game's relay doesn't have of LA-Online's own: lobbies kept on disk (its progress is kept while it runs - each
+player's save keeps his own), the kill tallies, bug reports and log bundles, the seed descriptors (opcode 0x15: no
+caller in this client), the capability check before a frame (it answers the capability queries as LA-Online's does,
+but takes the frames without them) and its exact messages (the session service's answers are the stand-in's). It
+follows the stand-in, frame for frame (`relay_parity.py`), and the game works with both alike (every online test).

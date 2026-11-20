@@ -28,9 +28,13 @@ why, is in [laonline-port.md](laonline-port.md); the relay protocol the game spe
 - **Safer saves.** Shared items, upgrades, rupees and hearts are given through the game's own item code, and PvP damage
   goes through the game's own damage, instead of being written into the save.
 - **Game 1.0.0 and 1.0.1** both work.
-- **Set up:** a `laonline.ini` next to the game with `server = <your host's address>:47620` and `name = <your name>`
-  (V15.2's installer writes this file; its other lines are fine to keep). Without one, the game plays as if online play
-  weren't there, and the menu has no Online page.
+- **Relays from the game.** The Online page's **Relay** tab picks the relay: LA-Online's own (always listed), the one
+  `laonline.ini` names, ones added by address (`host:port`), ones found on your network, or one this PC hosts itself
+  (Start hosting: the others on your network find it or add your address; over the internet, forward its TCP port).
+  `lasrecomp --relay [port]` runs only a relay, with no game, for a PC that doesn't play.
+- **Set up:** nothing more is needed - the Relay tab does it (a relay chosen there the first time takes a restart of the
+  game). A `laonline.ini` next to the game with `server = <address>:47620` and `name = <your name>` still works (V15.2's
+  installer writes this file; its other lines are fine to keep).
 - **Not in 16.0:** V15.2's own start screen and menus (the Online page replaces them), the self-updater, sending logs
   from the game, the D-pad shortcuts and V15.2's artwork.
 - **16.0 plays only with 16.0.** Rooms only match the same version (V14.1's rule): 16.0's saves and shared items work
@@ -55,6 +59,14 @@ is new is *who* connects:
    no limit per address).
 4. **Their PvP** (switch, attacks, hits) comes on their own connection, after its own V12 query, so the relay names
    each of them as the attacker or the one hit, as for any player.
+
+**A relay in the game.** Players can host a relay from the game itself (the Relay tab, or `lasrecomp --relay`):
+`runtime/laonline_host.cpp`, written from the stand-in below (rooms of 4, members-only room lobbies, a name once per
+lobby, PvP's limits, Global, leaderboards kept while it runs, a randomizer room's seed; the 15 s / 60 s timeouts). It
+isn't V15.2's relay: no lobbies saved to disk, no kill tallies, bug reports or log bundles. `relay_parity.py` checks it
+answers as the stand-in does, frame by frame, and every online test passes on it (`LAO_NATIVE_RELAY=1`). LA-Online's
+own relay is always first on the Relay tab and can't be removed: its public address goes in `LAO_OFFICIAL_RELAY`
+(`runtime/laonline_build.h`), empty until it is known.
 
 The tests (`tools/coop_tests/online_*.sh`) run against a stand-in relay that follows the real one's rules
 (`tools/laonline_relay.py`), or against the real one itself: `LAO_RELAY=<its folder>` (`tools/coop_tests/README.md`).
