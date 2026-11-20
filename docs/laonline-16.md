@@ -17,6 +17,12 @@ why, is in [laonline-port.md](laonline-port.md); the relay protocol the game spe
   room for 100.
 - **Co-op Randomizer:** the host's seed comes to the others' games by itself (patches against each player's own game
   files - no game files are sent) and their games switch to it.
+- **Teleport to a teammate.** In a co-op session, D-pad Up (keyboard F5) shows your teammates along the top of the
+  screen - name in their colour, where they are, their hearts; Left / Right picks, Confirm teleports you there (the
+  game's own fade), and your local players come along. Not in Global (everyone is in their own world there), not during
+  a scene, a door or a talk, nor into or out of a boss fight. The button is Controls > Online > Teleport button
+  (Automatic: Minus + D-pad Up instead when your D-pad moves Link or uses items), with how-tos for teleporting and
+  changing your colour beside it.
 - **PvP and Z-targeting for every player.** Each one turns PvP on with their own R3 (F6 for Player 1 too) and locks on
   with their own ZL.
 - **Safer saves.** Shared items, upgrades, rupees and hearts are given through the game's own item code, and PvP damage

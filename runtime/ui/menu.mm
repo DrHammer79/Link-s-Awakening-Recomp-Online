@@ -241,6 +241,7 @@ static int g_kbd_max = 8;
 // starts an empty line).
 extern "C" {
 #include "../hle/laonline_chat.h"
+#include "../hle/laonline_teleport.h"  // (the teleport picker: laonline_teleport_event)
 bool laonline_ui_paused(void);
 bool laonline_overlay_wanted(void);  // (runtime/ui/laonline_overlay.mm: the others' names and hearts, chat, the minimap)
 void laonline_overlay_draw(ImVec2 display, ImFont *font, float scale);
@@ -324,6 +325,8 @@ bool menu_handle_event(const SDL_Event *e) {
         if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) ui_typing_pad(true);
         if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 12000) g_last_pad = true, ui_typing_pad(true);
     }
+    // online play's teleport picker (runtime/ui/laonline_teleport.mm): F5 opens it; while up it has Player 1's keys
+    if (!capturing() && !g_chat_open.load() && laonline_teleport_event(e)) return true;
     // online chat (see g_chat_open): T opens it; it closes with Esc / F1, losing focus, or chat going away
     if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat && e->key.scancode == SDL_SCANCODE_T && !capturing() &&
         g_settings.laonline_chat && game_in_play() && laonline_chat_available() && !laonline_ui_paused()) {

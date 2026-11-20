@@ -22,6 +22,7 @@ extern "C" {
 #include "../platform.h"
 #include "../input_bind.h"
 #include "../settings.h"
+#include "../hle/laonline_teleport.h"  // (LAS Recomp Co-Op: the teleport button, online_options)
 
 extern "C" bool coop_supported(void);       // (... false once the game is a version without co-op)
 extern "C" uint32_t coop_joined(void);       // (runtime/hle/coop.c: the players in the game, a bit each)
@@ -386,6 +387,45 @@ static void zoom_options(bool coop) {
     opt_indent(-1);
 }
 
+// Online play (shown while it is set up: laonline.ini names a relay): the teleport button, and how-tos - each row's
+// description is the guide (runtime/ui/laonline_teleport.mm, the picker; runtime/hle/laonline_teleport.h)
+extern "C" bool laonline_configured(void);  // (runtime/hle/laonline.c: online play set up)
+static void online_options(void) {
+    if (!laonline_configured()) return;
+    opt_section("Online");
+    static const char *const keys[LAO_TP_KEY_COUNT] = {"Automatic", "D-pad Up", "D-pad Down", "D-pad Left", "D-pad Right",
+                                                       "Minus + D-pad Up", "Minus + D-pad Down", "Off"};
+    bool dpad_free = g_settings.dpad_mode == DPAD_NOTHING;
+    static char desc[400];
+    snprintf(desc, sizeof desc,
+             "The button that opens the teleport picker in an online co-op session. Automatic: %s. With Minus, the map "
+             "opens when Minus is let go instead of pressed. A D-pad button the D-pad already uses for movement or items "
+             "(Controls > D-pad) is the teleport's only while in a session. Keyboard: F5.",
+             dpad_free ? "D-pad Up (now: the D-pad does nothing else in play)"
+                       : "Minus + D-pad Up (now: your D-pad moves Link or uses items)");
+    opt_choice("Teleport button", &g_settings.laonline_teleport_key, keys, LAO_TP_KEY_COUNT, LAO_TP_KEY_AUTO, desc, false);
+    int mod, key;
+    laonline_teleport_chord(&mod, &key);
+    const char *key_name = key == SDL_GAMEPAD_BUTTON_DPAD_UP ? "D-pad Up" : key == SDL_GAMEPAD_BUTTON_DPAD_DOWN ? "D-pad Down"
+                         : key == SDL_GAMEPAD_BUTTON_DPAD_LEFT ? "D-pad Left" : key == SDL_GAMEPAD_BUTTON_DPAD_RIGHT ? "D-pad Right"
+                         : "the teleport button (now Off: set one above)";
+    static char how_tp[700];
+    snprintf(how_tp, sizeof how_tp,
+             "In an online co-op session (not Global), press %s%s (keyboard: F5): your teammates appear along the top - "
+             "their name in their color, where they are and their hearts. Left / Right picks one, Confirm teleports you "
+             "there, Back or the button again closes it. You arrive where they stand, and your local co-op players come "
+             "with you. Not during a scene, a door or a talk, and not into or out of a boss fight; a teammate you can't "
+             "reach says why. Local co-op players lost on the screen: press both sticks in (L3 + R3) to jump back to "
+             "Player 1.",
+             mod >= 0 ? "Minus + " : "", key_name);
+    opt_link("How to: teleport to a teammate", how_tp);
+    opt_link("How to: change your color",
+             "Your color - your tunic, and your name and pin as the others see you online: Cosmetics > Colors > Tunic "
+             "color. Local co-op players 2 to 8: hold Minus and press L or R in play to step through the colors, or pick "
+             "each player's color here under Co-op > Player N color. Two players can't share a color: a clash shows in "
+             "red.");
+}
+
 static void coop_options(void) {
     opt_section("Co-op");
     bool supported = coop_supported();
@@ -560,6 +600,7 @@ extern "C" void controls_tab_draw(float scale) {
     take_focus(FOCUS_CONFIGURE);
 
     coop_options();
+    online_options();
 
     opt_section("Movement");
     {

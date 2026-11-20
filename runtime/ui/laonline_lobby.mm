@@ -43,6 +43,9 @@ using LobbySocket = int;
 #include "laonline_seed_share.h"
 #include "../laonline_seed_transfer.h"
 extern "C" {
+#include "../hle/laonline_teleport.h"  // (the teleport button, shown in a started session)
+}
+extern "C" {
 #include "../rt.h"  // (LOG, rt_request_reboot, g_romfs_dir)
 #include "../paths.h"  // (rt_resource: the seed helper)
 #include "../settings.h"
@@ -568,7 +571,7 @@ static void seed_job(bool upload, const std::string &seed, const Directory &d) {
         std::string status, ready;
         bool ok = upload ? lao_seed_publish(server, name, lobby, password, "rando/" + seed, status)
                          : lao_seed_sync(server, name, lobby, password, "rando", ready, status);
-        if (ok && !upload && (ready.find_first_of("/\:") != std::string::npos || !rando_seed_there(ready.c_str()))) ready.clear();
+        if (ok && !upload && (ready.find_first_of("/\\:") != std::string::npos || !rando_seed_there(ready.c_str()))) ready.clear();
         LOG("[lobby] seed %s %s: %s\n", upload ? "upload" : "download", ok ? "done" : "failed", status.c_str());
         std::lock_guard<std::mutex> lock(g_lock);
         g_seed_status = status;
@@ -722,8 +725,17 @@ static void room_view(const Directory &d, float s) {
     ImGui::Spacing();
 
     if (room.started) {
-        if (g_launched && g_launched_room == room.code) ImGui::TextColored(ImVec4(.2f, .75f, .35f, 1), "%s", L("Playing online in this session."));
-        else if (!g_note.empty()) ImGui::TextWrapped("%s", L(g_note.c_str()));
+        if (g_launched && g_launched_room == room.code) {
+            ImGui::TextColored(ImVec4(.2f, .75f, .35f, 1), "%s", L("Playing online in this session."));
+            int mod, key;  // (the teleport: runtime/ui/laonline_teleport.mm - its button, as Controls > Online has it)
+            laonline_teleport_chord(&mod, &key);
+            if (key >= 0) {
+                const char *k = key == SDL_GAMEPAD_BUTTON_DPAD_UP ? "D-pad Up" : key == SDL_GAMEPAD_BUTTON_DPAD_DOWN ? "D-pad Down"
+                              : key == SDL_GAMEPAD_BUTTON_DPAD_LEFT ? "D-pad Left" : "D-pad Right";
+                ImGui::TextDisabled("%s %s%s %s", L("Teleport to a teammate:"), mod >= 0 ? "Minus + " : "", k,
+                                    L("(keyboard F5; Controls > Online)"));
+            }
+        } else if (!g_note.empty()) ImGui::TextWrapped("%s", L(g_note.c_str()));
         else ImGui::TextUnformatted(L("Joining the session..."));
     } else {
         ImGui::BeginDisabled(busy || !d.success);

@@ -18,6 +18,7 @@
 #include "../rumble.h"
 #include "../led.h"
 #include "../ui/menu.h"
+#include "laonline_teleport.h"  // (LAS Recomp Co-Op: online play's teleport button)
 
 enum {
     BTN_A = 0, BTN_B, BTN_X, BTN_Y, BTN_LSTICK, BTN_RSTICK, BTN_L, BTN_R, BTN_ZL, BTN_ZR, BTN_PLUS, BTN_MINUS,
@@ -844,6 +845,52 @@ float coop_leave_progress(int player) {
 
 bool input_gamepad_connected(void) { return pad != NULL; }
 
+// Online play's teleport button (runtime/hle/laonline_teleport.h: one controller button, or a modifier - Minus - held
+// with one), Player 1's controller, while it is teleport's (in play, online in a co-op session; otherwise the buttons
+// are the game's as ever). Its buttons don't reach the game; the modifier is held back from it until it is let go,
+// and let go alone it is given to the game then, as a press of its own (Minus: the map opens as it is let go, not as
+// it goes down). The picker (runtime/ui/laonline_teleport.mm) takes Player 1's controls while it is up.
+static _Atomic uint64_t tp_withheld;      // (game buttons kept from the game: the teleport's buttons while down)
+static _Atomic uint64_t tp_tap_bits;      // (the modifier let go alone: given to the game until tp_tap_until)
+static _Atomic uint64_t tp_tap_until;
+static bool tp_mod_down, tp_mod_used;
+static bool teleport_button(const SDL_Event *e) {  // (main thread, Player 1's controller) true: the teleport's
+    int mod = -1, key = -1, b = e->gbutton.button;
+    bool down = e->gbutton.down;
+    laonline_teleport_chord(&mod, &key);
+    if (key < 0 || !laonline_teleport_available()) {
+        if (tp_mod_down || atomic_load(&tp_withheld)) tp_mod_down = false, atomic_store(&tp_withheld, 0);
+        return false;
+    }
+    if (mod >= 0 && b == mod) {
+        if (down) {
+            tp_mod_down = true, tp_mod_used = false;
+            atomic_fetch_or(&tp_withheld, pad_bits(mod));
+        } else {
+            if (tp_mod_down && !tp_mod_used) {  // (let go alone: the game's own press of it now)
+                extern uint64_t renderer_present_count(void);
+                atomic_store(&tp_tap_bits, pad_bits(mod));
+                atomic_store(&tp_tap_until, renderer_present_count() + 10);
+            }
+            tp_mod_down = false;
+            atomic_fetch_and(&tp_withheld, ~pad_bits(mod));
+        }
+        return true;
+    }
+    if (b != key) return false;
+    if (!down) {  // (let go: the game has it again - if it ever took it)
+        uint64_t had = atomic_fetch_and(&tp_withheld, ~pad_bits(key));
+        return (had & pad_bits(key)) != 0;
+    }
+    if (mod >= 0 && !tp_mod_down) return false;  // (the key alone, without its modifier: the game's)
+    tp_mod_used = true;
+    atomic_fetch_or(&tp_withheld, pad_bits(key));
+    laonline_teleport_toggle();
+    return true;
+}
+// Is this controller Player 1's (not another local player's, nor one waiting to join)? (the picker's presses)
+bool input_player1_pad(SDL_JoystickID id) { return coop_slot_of(id) < 0 && !coop_waiting(id); }
+
 // touch screens: the on-screen controls (runtime/ui/mobile/touch_controls.mm)
 #if PLAT_TOUCH
 bool touch_handle_event(const SDL_Event *e);
@@ -935,6 +982,7 @@ void input_handle_event(const SDL_Event *e) {
             use_pad(e->gbutton.which, " (switched)");
         if (pad && e->gbutton.which != TEST_DEVICE && e->gbutton.which != SDL_GetGamepadID(pad)) break;  // (another pad)
         if (e->gbutton.down && !host_test) touch_pad_used();  // (the touch controls hide)
+        if (teleport_button(e)) { recompute_pad(); break; }  // (online play: the teleport button - not the game's)
         if (!host_test || e->gbutton.which == TEST_DEVICE) {  // (the press as the event has it, before reading the pad)
             uint64_t b = pad_bits(e->gbutton.button);
             note_press(e->gbutton.down ? b : 0, e->gbutton.down ? 0 : b);
@@ -1428,7 +1476,8 @@ static void fill_state(Cpu *c) {
         g_watch_hi = c->x[1] - 8 - 0x98 + hi;
         LOG("[input] watching controller object %llx\n", c->x[1] - 8);
     }
-    bool menu = menu_input_captured();  // the overlay menu / name entry has the controls (typing there isn't for the game)
+    bool menu = menu_input_captured()  // the overlay menu / name entry has the controls (typing there isn't for the game)
+                || laonline_teleport_open();  // (and online play's teleport picker: runtime/ui/laonline_teleport.mm)
     uint64_t held = key_buttons | pad_buttons | touch_buttons();
     atomic_fetch_and(&press_unseen, ~held);  // (the game sees these now)
     static uint64_t tap, tap_frame;  // (pressed and released since the last poll: held for the rest of this frame)
@@ -1441,6 +1490,11 @@ static void fill_state(Cpu *c) {
         } else if (f > tap_frame) tap = 0;
     }
     uint64_t b = menu ? script_buttons : held | tap | script_buttons;
+    {   // the teleport button's buttons kept from the game; its modifier let go alone given as a press (teleport_button)
+        extern uint64_t renderer_present_count(void);
+        b &= ~atomic_load(&tp_withheld);
+        if (!menu && renderer_present_count() < atomic_load(&tp_tap_until)) b |= atomic_load(&tp_tap_bits);
+    }
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_present_count(void);
         static uint64_t until;

@@ -147,6 +147,10 @@ static void p1_event_tick(void) {
 
 int coop_input_blocked(int i) { return coop_player_down(i) || (rt_coop_on() && i > 0 && g_p1_event); }
 
+// Player 1 free to move - in his normal state, not in an event, a door's walk-in, a talk, an item held up, hurt or
+// falling (runtime/ui/laonline_teleport.mm: a teleport only then). Read as p1_event_tick reads it; co-op on or off.
+int coop_p1_free(void) { return link_state_kind(host_player()) == 0; }
+
 static void revive_hit(int j) {
     if (!g_reviving[j]) return;
     for (int i = 1; i < COOP_MAX; i++)

@@ -21,6 +21,7 @@
 #include "../hle/laonline_session.h"
 #include "../hle/laonline_dungeon_map.h"
 #include "../hle/laonline_world_map.h"
+extern "C" void laonline_teleport_draw(ImDrawList *dl, ImVec2 display, ImFont *font, float scale);  // (LAS Recomp Co-Op)
 extern "C" int laonline_v12_pvp_peer(int);  // V12 (runtime/hle/laonline_v12.c)
 extern "C" int laonline_v12_pvp_local(void);
 extern "C" int laonline_v12_global_is_randomizer(void);
@@ -761,6 +762,7 @@ extern "C" void laonline_overlay_draw(ImVec2 display, ImFont *font, float scale)
     if(lao_world_plate_visible(true,(g_settings.laonline_username || g_settings.laonline_hearts) && g_settings.laonline_indicators,menu_is_open(),paused,map_open,game_in_play()!=0))
         for(int id=0;id<LAO_PLAYERS;id++)draw_world_plate(dl,display,font,scale,id);
     draw_chat(dl,display,font,scale);
+    laonline_teleport_draw(dl,display,font,scale);  /* (LAS Recomp Co-Op: the teleport picker, laonline_teleport.mm) */
 }
 
 /* V15 Z-targeting reticle (runtime/hle/ztarget.c), drawn in every mode (offline too): three arrows circling the

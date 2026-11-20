@@ -71,14 +71,18 @@ static const char *cur_level(void) {
     return ps ? (const char *)(uintptr_t)ps : "";
 }
 
-static int in_boss_arena(const char *lv, uint64_t frame) {
-    for (size_t i = 0; i < sizeof kBossArena / sizeof kBossArena[0]; i++) {
-        if (strcmp(lv, kBossArena[i].level)) continue;
-        float x, z;
-        if (!doorjump_player_xz(frame, &x, &z)) return 0;  // (not found yet: allow)
-        return x >= kBossArena[i].x0 && x < kBossArena[i].x1 && z >= kBossArena[i].z0 && z < kBossArena[i].z1;
-    }
+// (x, z) of level lv inside its boss's arena (also runtime/ui/laonline_teleport.mm: no teleport into or out of one)
+int rt_boss_arena_at(const char *lv, float x, float z) {
+    for (size_t i = 0; i < sizeof kBossArena / sizeof kBossArena[0]; i++)
+        if (!strcmp(lv, kBossArena[i].level))
+            return x >= kBossArena[i].x0 && x < kBossArena[i].x1 && z >= kBossArena[i].z0 && z < kBossArena[i].z1;
     return 0;
+}
+
+static int in_boss_arena(const char *lv, uint64_t frame) {
+    float x, z;
+    if (!doorjump_player_xz(frame, &x, &z)) return 0;  // (not found yet: allow)
+    return rt_boss_arena_at(lv, x, z);
 }
 
 // Game thread, inside the player's update: the third bottle was just used on X / Y. 1 = handled (no bottle swing).

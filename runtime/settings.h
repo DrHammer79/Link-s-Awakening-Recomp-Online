@@ -146,6 +146,8 @@ typedef struct {
     // co-op sync: what this player takes in from the team (each player chooses his own)
     bool laonline_sync_story, laonline_sync_supplies, laonline_sync_keys, laonline_sync_upgrades, laonline_sync_souls;
     bool laonline_sync_world;  // picked-up items, opened pots and cut item bushes (Co-op Randomizer)
+    // (LAS Recomp Co-Op) the button that opens the teleport picker (runtime/ui/laonline_teleport.mm): LAO_TP_KEY_*
+    int laonline_teleport_key;
     bool diff_ohko;      // any hit kills
     bool diff_hero;      // Hero Mode flag forced on in the loaded save (2x damage, no recovery hearts)
     // cosmetics (Cosmetics tab, runtime/ui/menu.mm), live, never part of a seed: colour rows of the shared palette

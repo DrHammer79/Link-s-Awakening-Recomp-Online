@@ -246,3 +246,19 @@ app (no Python in any build: seeds are a record, `seed.json`, built into game fi
 - **Seed transfer native** (above): the Python seed helper is gone.
 - **Settings**: co-op's and online play's keys in the new `settings_apply` (so `--set` and `--list-settings` know them).
 - **Menu sticks**: the new rule (one direction at a time, `ui_stick_dir`) fed by every controller's furthest push.
+
+## Teleport to a teammate (2026-11-20, new)
+
+Online play in a co-op session only (a room, or a lobby laonline.ini names; not Global: there each player is in a
+world of their own, and a teammate's spot may be somewhere the player's save can't be yet). A button (Controls >
+Online > Teleport button; Automatic: D-pad Up, which the game doesn't use in play, or Minus + D-pad Up when the D-pad
+moves Link or uses items; F5) opens a picker along the top of the screen: a card per teammate with their name in their
+colour, where they are and their hearts (`laonline_teammates`). Left / Right picks, Confirm teleports, Back or the
+button again closes it; while it is up Player 1's controls are its (`input.c`, as for the menu). With Minus in the
+button, Minus is held back from the game while down and given to it as a press when let go alone (the map opens on
+release). The teleport is the warp tab's: the game's level jump to the arrival point of their level nearest them
+(`warp_data.h`: their square of the island or dungeon room by name, else by the 15 x 12 grid), then Link put where
+they stand (`warp_request_place`); co-op brings the local players along. Refused (the card or the line under the
+cards says why): Player 1 not free to move (co-op's event check, `coop_p1_free`), the area loading, either side in a
+boss's arena (`rt_boss_arena_at`, the Escape Bottle's table), the teammate knocked out or somewhere without an arrival
+point. `runtime/ui/laonline_teleport.mm`, `runtime/hle/laonline_teleport.h`; `tools/coop_tests/online_teleport.sh`.

@@ -59,6 +59,7 @@ typedef int sock_t;
 #include "../settings.h"
 #include "../cosmetic_colour.h"
 #include "laonline_session.h"
+#include "laonline_teleport.h"  /* (LAS Recomp Co-Op's port: laonline_teammates) */
 #include "laonline_location.h"
 #include "../ui/laonline_map_state.h"
 #include "laonline_native.h"
@@ -1732,6 +1733,29 @@ int laonline_v12_peer(int id,float pos[3],uint16_t *map,int *local_id){
     pos[0]=p->state.x;pos[1]=p->state.y;pos[2]=p->state.z;*map=p->state.map;*local_id=g_srv_session.local_id;
     pthread_mutex_unlock(&g_srv_lock);
     return joined;
+}
+
+/* LAS Recomp Co-Op: the teleport's teammates (runtime/hle/laonline_teleport.h) - the lobby's joined players with a
+ * position, as the relay last gave them; this PC's other local players aren't among them (laonline_local_hide). */
+int laonline_teammates(LaoTeammate *out, int cap) {
+    int n = 0;
+    pthread_mutex_lock(&g_srv_lock);
+    for (int id = 0; g_srv_session.connected && id < LAO_PLAYERS && n < cap; id++) {
+        const LaoPeer *p = &g_srv_session.peers[id];
+        if (!p->joined || !p->samples || id == g_srv_session.local_id) continue;
+        LaoTeammate *t = &out[n++];
+        memset(t, 0, sizeof *t);
+        t->id = id;
+        snprintf(t->name, sizeof t->name, "%s", p->name);
+        memcpy(t->rgb, p->rgb, 3);
+        t->map = p->state.map, t->room = p->state.room;
+        t->pos[0] = p->state.x, t->pos[1] = p->state.y, t->pos[2] = p->state.z;
+        t->hp = p->health, t->max_hp = p->max_health;
+        t->down = p->max_health && !p->health;  /* (hearts at 0: his state's flags carry animation bits here) */
+        snprintf(t->location, sizeof t->location, "%s", p->location);
+    }
+    pthread_mutex_unlock(&g_srv_lock);
+    return n;
 }
 
 RT_ON_RESET(laonline_reset) {

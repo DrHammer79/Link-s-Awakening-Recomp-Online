@@ -253,6 +253,7 @@ static const struct { const char *key; size_t at; bool is_bool; int lo, hi; } k_
     ONLINE_BOOL(laonline_collection_counters),
     ONLINE_BOOL(laonline_sync_story), ONLINE_BOOL(laonline_sync_supplies), ONLINE_BOOL(laonline_sync_keys),
     ONLINE_BOOL(laonline_sync_upgrades), ONLINE_BOOL(laonline_sync_souls), ONLINE_BOOL(laonline_sync_world),
+    ONLINE_INT(laonline_teleport_key, 0, 7),  // (LAO_TP_KEY_*: 0 automatic)
 };
 #undef ONLINE_BOOL
 #undef ONLINE_INT
