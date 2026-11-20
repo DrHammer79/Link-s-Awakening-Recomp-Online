@@ -383,8 +383,8 @@ Both like section 6a: a connection of their own, one frame each way, the answer'
 
 ## 6c. A Co-op Randomizer room's seed (0x16 / 0x17 / 0x18) [code]
 
-Sent by the seed generator's helper (`tools/rando/lao_seed_transfer.py`, his; started by the Online page), each
-transfer on a connection of its own; the frames as in section 1, a frame's body at most 4096 bytes.
+Sent by the game (`runtime/laonline_seed_transfer.cpp`, started by the Online page; his V15.2 sent it from its seed
+helper, `tools/rando/lao_seed_transfer.py`), each transfer on a connection of its own; the frames as in section 1, a frame's body at most 4096 bytes.
 `credentials` = `str name, str lobby (the room's, 26 bytes at most, + ".rando"), str password`.
 
 - **Upload** (the host's game): `16, 01, credentials, world checksum (32), u32 size, sha256 (32)`; the relay answers
@@ -392,6 +392,10 @@ transfer on a connection of its own; the frames as in section 1, a frame's body 
   sha256 match (the package kept for that lobby), anything else = refused.
 - **Download** (a joiner's game): `16, 00, credentials`; the relay answers `9D 01, u32 size, sha256 (32)` (38 bytes)
   when it has the lobby's package, then `9E, data` chunks, then `9F`; anything else = "not there yet" (retried).
+- **The package** [relay]: a zip whose `manifest.json` has `format` "LAO-WORLD-PATCH-1", `baseline` "beta_5.3" or
+  "beta_5.4", `seed_id` ([A-Z0-9-]{20,95}), `world_sha256` (64 hex: the upload's world checksum) and `name`
+  ([A-Za-z0-9 _()-]{1,90}); the relay checks those and keeps it per lobby (on disk). 16.0's adds `seed_format`
+  "lasrecomp-seed-1" and holds the seed folder's own files under `seed/`.
 
 The package is a zip: `manifest.json` (format LAO-WORLD-PATCH-1, the seed's ID, name and world checksum, one entry per
 file) and, for each of the seed's `romfs/` files, its bytes XOR the matching file of the receiver's own game (named

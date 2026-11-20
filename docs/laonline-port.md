@@ -66,14 +66,21 @@ your own path 1.5 s late), `host` / `join` (two PCs, direct), `server` (his rela
   Randomizer room needs is the one being played (his launcher downloaded a missing one: not taken - the page says to
   play the host's seed - taken since: below). `laonline_lobby_config` gives it the ini's name and relay.
   `tools/coop_tests/online_lobby.sh`.
-- A Co-op Randomizer room's seed (his V13 / V15.2): his `tools/rando/lao_seed_transfer.py` as he wrote it, run by
-  the seed generator's helper (`tools/rando/las_headless.py` hands it `--lao-*`, as his did). The host's game uploads
+- A Co-op Randomizer room's seed (his V13 / V15.2): his transfer, native since LAS Recomp's November 2026 randomizer
+  took Python out of every build (`runtime/laonline_seed_transfer.cpp`; his `tools/rando/lao_seed_transfer.py` ran in
+  the Python seed helper, which is gone). The host's game uploads
   the room's seed while hosting (his keepalive: 15 s after the room is known, every minute for 10 minutes, then every
   5); a joiner's downloads it (every 20 s until it is there) and switches to it (`rando_select` + the in-place reboot,
   as the Randomizer page does) - the room stays joined through the reboot, and the session begins once the seed
-  matches. The package is patches against each player's own game files; no game file travels.
-  `tools/coop_tests/online_seed.sh` (the helper's export / import round trip, and the game's upload, download and
-  switch). Seeds from this build's generator have every file his helper checks for (`tracker.tsv`, `flags.tsv`, ...).
+  matches. A seed is now its record (`seed.json`: every decision its game files are built from, on each machine,
+  from that player's own files) and its code patches (`exefs/*.pchtxt`), so the package is the seed folder's own
+  files (not its saves); his patches against each player's game files had been for seeds that held their changed game
+  files (`romfs/`). No game file travels either way. The world checksum (`runtime/laonline_seed.cpp`) hashes a
+  record seed's `seed.json` and `exefs/` (its own schema); an older seed is hashed as V15.2 did - and isn't sent
+  (made before the record, its folder holds game files: the page says to make it again). The relay side is his,
+  unchanged: the manifest names LAO-WORLD-PATCH-1 and the baseline the relay accepts, plus
+  `"seed_format": "lasrecomp-seed-1"`. `tools/coop_tests/online_seed.sh` (the game's upload, the package's contents,
+  the download checked against the checksum, the switch).
   Two more tabs, his start screen's: **Global** (Join / Leave Global: launch mode 3 with his variant - Global
   Randomizer while a seed is played - and the player count, relay 0x33) and **Leaderboards** (the completed runs,
   filters, pages, Submit a run: relay 0x32, his V12 fallback kept). `tools/coop_tests/online_global.sh`.
@@ -216,3 +223,20 @@ stand-in's lines, so every online test runs against it: `LAO_RELAY=<its folder>`
   the first hit was spoiled by another heavy program on the PC.
 - The stand-in now follows these rules too (room lobbies, 4 per lobby, a name once per lobby and room, PvP's query and
   rate limits, start once all are Ready, members pruned), and names room lobbies as the relay does (`V10-<code>`).
+
+## LAS Recomp's November 2026 develop merged (2026-11-19)
+
+LAS Recomp moved its game code generator to C++ (`runtime/gen/`, run by the app's setup and the `lasgen` tool; the
+Python `tools/gen.py` / `tools/patches.py` stay as the reference it is checked against) and its randomizer into the
+app (no Python in any build: seeds are a record, `seed.json`, built into game files in memory).
+
+- **Co-op's and online play's patches in the C++ generator** (`runtime/gen/patches.cpp`): the damage split
+  (`damage_lsl`, `damage_fixed`), online play's two patches (`laonline_shadow_update`, `laonline_animation`) and Game
+  Over hook, every co-op hook site, and the reads of "Link" (`player_read`). The reads' list is a header now,
+  `runtime/game_addresses/coop_player_reads_v1_0_1.h` (`COOP_PLAYER_READ(address, word)`), compiled into the
+  generator and read by the Python the same: the app makes its game code with no repository files beside it.
+  `tools/test_gen_cpp.py`: the C++ output is the Python's, every file, main in both SIMD modes (on Windows gen.py
+  writes CRLF: compared without).
+- **Seed transfer native** (above): the Python seed helper is gone.
+- **Settings**: co-op's and online play's keys in the new `settings_apply` (so `--set` and `--list-settings` know them).
+- **Menu sticks**: the new rule (one direction at a time, `ui_stick_dir`) fed by every controller's furthest push.

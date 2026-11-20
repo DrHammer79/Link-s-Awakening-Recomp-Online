@@ -41,6 +41,7 @@ using LobbySocket = int;
 #include "i18n.h"
 #include "plastic.h"  // (the menu's tab colours: the tab row)
 #include "laonline_seed_share.h"
+#include "../laonline_seed_transfer.h"
 extern "C" {
 #include "../rt.h"  // (LOG, rt_request_reboot, g_romfs_dir)
 #include "../paths.h"  // (rt_resource: the seed helper)
@@ -552,61 +553,23 @@ static void test_drive(const Directory &d) {
 // room (15 s after the room is known, then every minute for 10 minutes, then every 5 - his keepalive: an upload lost
 // on the relay comes back); a joiner without it downloads it (every 20 s until it is there, 45 tries) and the game
 // switches to it - rando_select + the in-place reboot, as the Randomizer page switches seeds; the room stays joined
-// (this page's state lives through the reboot) and the session begins once the seed matches. The transfer itself is
-// his tools/rando/lao_seed_transfer.py in the seed generator's helper: the seed's files as patches against each
-// player's own game files (no game files sent), checked against the room's world checksum; an exact world already on
-// this PC is reused. One job at a time, on its own thread; its log: laonline-seed-transfer.log.
+// (this page's state lives through the reboot) and the session begins once the seed matches. The transfer is
+// runtime/laonline_seed_transfer.cpp (his tools/rando/lao_seed_transfer.py's, native: LAS Recomp has no Python seed
+// helper any more): the seed folder's own files - its record and code patches, no game files - checked against the
+// room's world checksum when they arrive; an exact world already on this PC is reused. One job at a time, on its own
+// thread.
 static std::atomic<bool> g_seed_busy(false);
 static std::string g_seed_status, g_seed_ready;  // (g_lock) what the job last said; a downloaded seed's folder
-static std::vector<std::string> seed_helper(void) {  // (as rando_tab.mm finds the generator)
-    char p[1024], q[1024];
-    if (rt_resource("rando-gen/las_headless.py", NULL, p, sizeof p)) return {p};  // (iOS: its embedded Python)
-    if (rt_resource("rando-gen/rando-gen" PLAT_EXE_SUFFIX, NULL, p, sizeof p)) return {p};
-    if (rt_resource(NULL, "third_party/LAS-Randomizer/" PLAT_VENV_PYTHON, p, sizeof p) &&
-        rt_resource(NULL, "tools/rando/las_headless.py", q, sizeof q)) return {p, q};  // (a source checkout)
-    return {};
-}
-// The room's relay, lobby (without ".rando": the helper adds it) and password, for the helper (his rando/.lao-room.ini).
-static bool room_ini(const Directory &d) {
-    std::error_code e;
-    std::filesystem::create_directories("rando", e);
-    std::ofstream f("rando/.lao-room.ini", std::ios::trunc);
-    if (!f) return false;
-    std::string lobby = d.lobby;
-    if (lobby.size() > 6 && lobby.compare(lobby.size() - 6, 6, ".rando") == 0) lobby.resize(lobby.size() - 6);
-    f << "server = " << g_endpoint << "\nname = " << my_name(d) << "\nlobby = " << lobby << "\npassword = " << d.password << "\n";
-    return (bool)f;
-}
-static void seed_job(bool upload, const std::string &seed) {  // upload: rando/<seed> to the room; else: the room's
-    if (!g_romfs_dir || g_seed_busy.exchange(true)) return;
-    std::vector<std::string> cmd = seed_helper();
-    if (cmd.empty()) {
-        std::lock_guard<std::mutex> lock(g_lock);
-        g_seed_status = "The seed helper (rando-gen) is missing.";
-        g_seed_busy = false;
-        return;
-    }
-    namespace fs = std::filesystem;
-    std::string ini = fs::absolute("rando/.lao-room.ini").string(), base = fs::absolute(g_romfs_dir).string();
-    std::string result = fs::absolute("rando/.lao-transfer-result.txt").string(), log = fs::absolute("laonline-seed-transfer.log").string();
-    if (upload) cmd.insert(cmd.end(), {"--lao-publish", fs::absolute("rando/" + seed).string(), base, ini});
-    else cmd.insert(cmd.end(), {"--lao-sync", ini, base, fs::absolute("rando").string(), result});
+static void seed_job(bool upload, const std::string &seed, const Directory &d) {  // upload: rando/<seed>; else the room's
+    if (g_seed_busy.exchange(true)) return;
+    std::string server = g_endpoint, name = my_name(d), lobby = d.lobby, password = d.password;
     LOG("[lobby] seed %s: %s\n", upload ? "upload" : "download", upload ? seed.c_str() : "the host's");
-    std::thread([cmd, upload, result, log]() {
-        std::vector<const char *> argv;
-        for (auto &a : cmd) argv.push_back(a.c_str());
-        argv.push_back(nullptr);
-        PlatProc pr = plat_spawn(argv.data(), log.c_str(), false);
-        int code = pr ? plat_proc_wait(pr, true) : -1;
+    std::thread([=]() {
         std::string status, ready;
-        { std::ifstream f(log); std::string line; while (std::getline(f, line)) if (!line.empty() && line[0] != '{') status = line.substr(0, 300); }
-        if (!code && !upload) {
-            std::ifstream f(result);
-            std::getline(f, ready);
-            while (!ready.empty() && (ready.back() == '\r' || ready.back() == '\n')) ready.pop_back();
-            if (ready.find_first_of("/\\:") != std::string::npos || !rando_seed_there(ready.c_str())) ready.clear();
-        }
-        LOG("[lobby] seed %s %s: %s\n", upload ? "upload" : "download", code ? "failed" : "done", status.c_str());
+        bool ok = upload ? lao_seed_publish(server, name, lobby, password, "rando/" + seed, status)
+                         : lao_seed_sync(server, name, lobby, password, "rando", ready, status);
+        if (ok && !upload && (ready.find_first_of("/\:") != std::string::npos || !rando_seed_there(ready.c_str()))) ready.clear();
+        LOG("[lobby] seed %s %s: %s\n", upload ? "upload" : "download", ok ? "done" : "failed", status.c_str());
         std::lock_guard<std::mutex> lock(g_lock);
         g_seed_status = status;
         if (!ready.empty()) g_seed_ready = ready;
@@ -625,10 +588,10 @@ static void seed_tick(const Directory &d, const Room &room) {
     bool have = seed_cached(world, seed) && world == room.world && seed == room.seed;
     if (room_key != room.code + room.world) room_key = room.code + room.world, tries = 0, next_at = now_ms() + (host ? 15000 : 0);
     if (host) {  // (his keepalive: the room's seed is the host's own, the one he plays)
-        if (!have || now_ms() < next_at || g_seed_busy.load() || !room_ini(d)) return;
+        if (!have || now_ms() < next_at || g_seed_busy.load()) return;
         next_at = now_ms() + (tries++ < 10 ? 60000 : 300000);
         const char *dir = rando_seed_dir();
-        seed_job(true, std::filesystem::path(dir).filename().string());
+        seed_job(true, std::filesystem::path(dir).filename().string(), d);
         return;
     }
     if (have) return;
@@ -640,9 +603,9 @@ static void seed_tick(const Directory &d, const Room &room) {
         rt_request_reboot(RT_REBOOT_GAME);
         return;
     }
-    if (now_ms() < next_at || g_seed_busy.load() || tries >= 45 || !room_ini(d)) return;
+    if (now_ms() < next_at || g_seed_busy.load() || tries >= 45) return;
     next_at = now_ms() + 20000, tries++;
-    seed_job(false, "");
+    seed_job(false, "", d);
 }
 
 // Each frame the game draws (menu.mm menu_render): a press made during a poll, the room's poll every 2 s, and the

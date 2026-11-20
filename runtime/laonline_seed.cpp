@@ -1,4 +1,10 @@
 // Content identity for co-op: independent of folder names and local save files.
+//
+// LAS Recomp Co-Op's port: a seed made since LAS Recomp's November 2026 randomizer (docs/randomizer.md, "Seed folder")
+// is its record, seed.json - the settings, tables and every decision its game files are built from on each machine,
+// from that player's own game files - and its code patches, exefs/*.pchtxt: those are what make its world, so they are
+// what is hashed (its own schema: an older seed's identity can't match a newer one's). An older seed (romfs/ with the
+// changed game files, settings.json, tables beside it) is hashed as V15.2 did.
 #include "cache_sha256.h"
 #include <algorithm>
 #include <filesystem>
@@ -7,10 +13,25 @@
 extern "C" const char *rando_seed_dir(void);
 extern "C" int laonline_seed_identity_folder(const char *dir,unsigned char out[32]) {
  try {
-  CacheSha256 hash; const char schema[]="LAO15-1.0.0-inventory-v1";
-  hash.add(schema,sizeof schema);
-  if(dir) {
-   namespace fs=std::filesystem;
+  namespace fs=std::filesystem;
+  bool record=dir && fs::is_regular_file(fs::path(dir)/"seed.json");
+  CacheSha256 hash; const char schema[]="LAO15-1.0.0-inventory-v1", schema_record[]="LAO16-seed-record-v1";
+  if(record) hash.add(schema_record,sizeof schema_record); else hash.add(schema,sizeof schema);
+  if(record) {
+   fs::path root(dir); std::vector<std::string> names{"seed.json"};
+   if(fs::is_directory(root/"exefs"))
+    for(auto const &entry:fs::recursive_directory_iterator(root/"exefs"))
+     if(entry.is_regular_file()) names.push_back(entry.path().lexically_relative(root).generic_string());
+   std::sort(names.begin(),names.end());
+   char block[65536];
+   for(auto const &name:names) {
+    auto length=fs::file_size(root/name);
+    hash.add(name.c_str(),name.size()+1);unsigned char size_le[8];for(int i=0;i<8;i++)size_le[i]=(unsigned char)(length>>(8*i));hash.add(size_le,sizeof size_le);
+    std::ifstream f(root/name,std::ios::binary); if(!f) return 0;
+    while(f) {f.read(block,sizeof block);hash.add(block,(size_t)f.gcount());}
+    if(!f.eof()) return 0;
+   }
+  } else if(dir) {
    fs::path root(dir); std::vector<std::string> names;
    for(auto sub:{"romfs","exefs"}) {
     fs::path base=root/sub;

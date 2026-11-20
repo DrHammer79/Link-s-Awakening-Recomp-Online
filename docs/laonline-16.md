@@ -56,7 +56,7 @@ The tests (`tools/coop_tests/online_*.sh`) run against a stand-in relay that fol
 ## For the developer
 
 - **Where things are:** the online code is V15.2's (`runtime/hle/laonline*`, `runtime/ui/laonline_*`,
-  `runtime/hle/ztarget.c`, `tools/rando/lao_seed_transfer.py`), with each change marked "LAS Recomp Co-Op's port" in a
+  `runtime/hle/ztarget.c`; his seed transfer is native now: `runtime/laonline_seed_transfer.cpp`), with each change marked "LAS Recomp Co-Op's port" in a
   comment and listed in [laonline-port.md](laonline-port.md). New files of ours: `runtime/hle/laonline_local.c` (local
   players on the relay), `runtime/ui/laonline_lobby.mm` (the Online page, from V15.2's `session_ui.mm`).
 - **Addresses:** every game address is named, for game 1.0.0 and 1.0.1, in `runtime/game_addresses/`
