@@ -1257,6 +1257,19 @@ static int pvp_self_of_id(int id) {  /* this PC's player whose relay id this is 
     return -1;
 }
 static void pvp_tick(struct Cpu *c, uint64_t frame, const char *level, const float me[3], int have_me) {
+    {   /* (LAS Recomp Co-Op, test) LARECOMP_TEST_HP=<render frame>:<quarter hearts>: Player 1's hearts set once then -
+         * one PvP hit from a knock-out, say (tools/coop_tests/online_pvp_ko.sh) */
+        static int done;
+        static const char *test_hp = (const char *)-1;
+        unsigned long at; int q; uint64_t ps;
+        if (test_hp == (const char *)-1) test_hp = getenv("LARECOMP_TEST_HP");
+        if (!done && test_hp && sscanf(test_hp, "%lu:%d", &at, &q) == 2 &&
+            renderer_present_count() >= at && save_ready() && (ps = pvp_status())) {
+            done = 1;
+            ST16(ps + 0x84, (uint16_t)q);
+            LOG("[laonline] test: Player 1's hearts set to %d/4\n", q);
+        }
+    }
     for (int s = 0; s < PVP_SELVES; s++) {  /* each player's PvP switch: Player 1's R3 / F6, the others' R3 */
         if (!(s ? atomic_exchange(&pvp_toggle_req[s], 0) : atomic_exchange(&key_f6, 0)) || !cfg_pvp) continue;
         if (!pvp_mode()) { laonline_notify("PvP is available when you play online."); continue; }

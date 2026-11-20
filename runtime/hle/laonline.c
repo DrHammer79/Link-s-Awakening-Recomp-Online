@@ -1007,7 +1007,7 @@ static void srv_handle(const uint8_t *b, int len) {
         const char *name=(len>=2 && b[1]<LAO_PLAYERS && g_srv_session.peers[b[1]].joined)?g_srv_session.peers[b[1]].name:NULL;
         laonline_coop_message(b,(size_t)len,name);
     }
-    if(b[0]==0xa0)laonline_death_message(b,(size_t)len);
+    /* (a death notice: below, once g_srv_lock is free - LAS Recomp Co-Op's port) */
     if(b[0]==S_PLAYER_LEAVE&&len==2)laonline_death_peer_left(b[1]);
     if(b[0]==0x98||b[0]==0x9b){extern void laonline_coop_world_message(const uint8_t *,size_t);laonline_coop_world_message(b,(size_t)len);}
     if(b[0]==LAO_STORY_RECEIVE)laonline_story_receive(b,(size_t)len);
@@ -1049,6 +1049,12 @@ static void srv_handle(const uint8_t *b, int len) {
         LOG("[laonline] rejected or malformed server welcome%s%s\n", refused[0] ? ": " : "", refused);
     }
     pthread_mutex_unlock(&g_srv_lock);
+    /* LAS Recomp Co-Op's port: a death notice is handled with g_srv_lock free. A PvP knock-out's names its killer
+     * (laonline_v12_pvp_killer), which reads this PC's relay id through laonline_v12_peer - g_srv_lock again: taken
+     * here, inside it, the relay thread waited on itself for good, and the game thread with it at its next frame's
+     * call (both games of a PvP knock-out stopped: the relay sends the notice to everyone, its sender too;
+     * tools/coop_tests/online_pvp_ko.sh). It reads nothing of the session. */
+    if (b[0] == 0xa0) laonline_death_message(b, (size_t)len);
     if (refused[0]) ov_toast("%s", refused);
     if (accepted && b[0] == S_WELCOME) ov_toast("%s joined the session",g_cfg.name);
     if (accepted && !was_joined && b[0] == S_PLAYER_JOIN && event_name[0]) ov_toast("%s joined", event_name);

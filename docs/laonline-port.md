@@ -217,10 +217,16 @@ stand-in's lines, so every online test runs against it: `LAO_RELAY=<its folder>`
   so his is the lobby's first - the relay's lobby host, whose world the lobby takes. His connected status alone wasn't
   enough: moving from a session to Global, his old connection still counted while it closed, and his Player 2 was in
   Global before him.
-- **Open:** in `online_soak.sh` against it, Bob's hearts ran out to PvP hits (half a heart each - the stand-in gave a
-  quarter, so no one had been knocked out there) and both games stopped drawing frames as his Game Over began (the
-  main threads in the game's shared-pointer release, `SP_RELEASE`). Not reproduced yet: a run with Bob knocked out on
-  the first hit was spoiled by another heavy program on the PC.
+- **A PvP knock-out froze both games** (his V15.2 too): `online_soak.sh` against it knocked Bob out (half a heart a
+  hit there - the stand-in gave a quarter, so no one had been), and both games stopped drawing frames. gdb on the
+  frozen games (`tools/coop_tests/online_pvp_ko.sh` makes it happen every time: Bob put at half a heart before a hit,
+  `LARECOMP_TEST_HP`): Player 1's relay thread handles a message with `g_srv_lock` held, and a death notice's handler
+  (`laonline_death_message`) names a PvP knock-out's killer (`laonline_v12_pvp_killer`) through `laonline_v12_peer`,
+  which takes `g_srv_lock` - the thread waited on itself, and the game thread on it at its next frame. The relay sends
+  a death notice to everyone in the lobby, its sender too: both games. Now `srv_handle` passes the notice on once it
+  has let the lock go (the handler reads nothing of the session); that also ends the other order the two locks were
+  taken in there (`g_srv_lock` then PvP's `mx`, where the game thread takes `mx` then `g_srv_lock`). The stand-in
+  sends death notices to their sender too, as the relay does.
 - The stand-in now follows these rules too (room lobbies, 4 per lobby, a name once per lobby and room, PvP's query and
   rate limits, start once all are Ready, members pruned), and names room lobbies as the relay does (`V10-<code>`).
 

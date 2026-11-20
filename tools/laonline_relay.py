@@ -9,8 +9,8 @@ admits only the room's members, by name, once it started; 4 players per lobby (t
 Global, whose lobbies take only Global's HELLO); a name once per lobby; PvP frames only after the V12 query (else the
 connection is dropped), hits only between players who both have PvP on, half a heart unless it says, at most one per
 0.45 s per target and none on a player hit in the last 0.8 s; rooms of 4, a name once per room, a member not seen for
-10 s not Ready and for 2 minutes gone. Elsewhere the safe choice the spec lists (section 8): the lowest free id; chat
-echoed to its sender, death notices not; each player's last hearts / location / look / marker / PvP state replayed
+10 s not Ready and for 2 minutes gone; a death notice to everyone in the lobby, its sender too. Elsewhere the safe
+choice the spec lists (section 8): the lowest free id; chat echoed to its sender; each player's last hearts / location / look / marker / PvP state replayed
 to newcomers; the first joiner sets a lobby's password and seed. A test tool, not a server for play.
 
 Clients: laonline.ini `mode = server`, `server = 127.0.0.1:<port>` (default port 47620). Logs one line per event on
@@ -237,9 +237,9 @@ def handle(p, b):
         d, mask = bytes(b[2:34]), b[34]
         L.story[d] = L.story.get(d, 0) | mask
         to_all(p, bytes([0xA1, 1]) + d + bytes([L.story[d], 0]))
-    elif t == 0x19:   # DEATH: to the others (an echo would show the sender its own notice)
+    elif t == 0x19:   # DEATH: to everyone, its sender too (as the real relay: its game then says "<name> was defeated")
         log(f'death of {p.id}')
-        to_others(p, bytes([0xA0]) + pid + b[1:14] + name17(p.name))
+        to_all(p, bytes([0xA0]) + pid + b[1:14] + name17(p.name))
     elif t == 0x1C:   # PVP (only after the V12 query: the real relay drops a connection that sends it before)
         if not p.v12:
             log(f'protocol error from {p.id}: PvP before the V12 query (dropped)')

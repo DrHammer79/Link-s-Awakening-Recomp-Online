@@ -33,8 +33,8 @@ why, is in [laonline-port.md](laonline-port.md); the relay protocol the game spe
 ## For relay hosts
 
 **16.0 runs on LA-Online's relay as it is** - V15.2's `server.py`, unchanged, run as its Docker setup runs it (4
-players per lobby): the online tests pass against it (2026-11-18; one open: in the 8-minute run a PvP knock-out
-froze both games once - not yet reproduced, see laonline-port.md). Nothing in the protocol is new - 16.0 sends and
+players per lobby): every online test passes against it (2026-11-19). One fix concerns V15.2 as well: a PvP
+knock-out froze every game in the lobby (a lock taken twice by the death notice's handler - laonline-port.md). Nothing in the protocol is new - 16.0 sends and
 expects what V15.2 does (the same HELLO, session service, seed transfer, leaderboards, Global and PvP messages). What
 is new is *who* connects:
 
